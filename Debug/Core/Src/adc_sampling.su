@@ -1,0 +1,2 @@
+../Core/Src/adc_sampling.c:45:6:HAL_ADC_ConvCpltCallback	16	static
+../Core/Src/adc_sampling.c:76:6:adc_sampling	16	static

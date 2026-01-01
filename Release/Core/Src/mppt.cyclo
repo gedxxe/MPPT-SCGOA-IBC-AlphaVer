@@ -1,0 +1,4 @@
+../Core/Src/mppt.c:93:14:goa_rand01	1
+../Core/Src/mppt.c:117:6:MPPT_GOA_PNO_Asym_Hybrid	49
+../Core/Src/mppt.c:405:6:MPPT_PnO	11
+../Core/Src/mppt.c:429:6:charging_flow	12

@@ -1,0 +1,5 @@
+../Core/Src/lcd_display.c:29:9:u8x8_gpio_and_delay	8	static
+../Core/Src/lcd_display.c:40:9:u8x8_i2c	24	static
+../Core/Src/lcd_display.c:69:6:lcd_init	16	static
+../Core/Src/lcd_display.c:108:6:lcd_print_unit	16	static
+../Core/Src/lcd_display.c:131:6:lcd_main_display	16	static

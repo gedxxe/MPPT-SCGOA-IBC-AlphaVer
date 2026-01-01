@@ -1,0 +1,4 @@
+../Core/Src/mppt.c:93:14:goa_rand01	8	static
+../Core/Src/mppt.c:117:6:MPPT_GOA_PNO_Asym_Hybrid	72	static
+../Core/Src/mppt.c:405:6:MPPT_PnO	20	static
+../Core/Src/mppt.c:429:6:charging_flow	16	static
