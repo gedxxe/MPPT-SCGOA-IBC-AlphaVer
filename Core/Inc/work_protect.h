@@ -12,9 +12,11 @@ typedef enum {
 	TEMPERATURE_HIGH
 } ErrorStatus_e;
 
+/* Status error global yang dipakai modul proteksi dan UI. */
 extern ErrorStatus_e mpptError;
-extern uint8_t flag_charge_allow;
 
+/* Menjalankan proteksi suhu/tegangan/arus serta menyalakan relay
+ * sebelum memulai state machine charging. Dipanggil periodik. */
 void work_protect_charging(void);
 
 #endif

@@ -4,10 +4,12 @@
 #include "stm32f1xx_hal.h"
 #include <math.h>
 
-#define BAT_VOLT_COEF	9.5f
-#define PV_VOLT_COEF	9.6f
-#define BAT_CURR_COEF	13.1f
-#define PV_CURR_COEF	16.1f
+/* Koefisien pembagi tegangan/arus hasil kalibrasi hardware
+ * untuk mengonversi nilai ADC mentah ke satuan fisik. */
+#define BAT_VOLT_COEF	9.5f   // Skala tegangan baterai
+#define PV_VOLT_COEF	9.6f   // Skala tegangan PV
+#define BAT_CURR_COEF	13.1f  // Skala arus baterai
+#define PV_CURR_COEF	16.1f  // Skala arus PV
 
 extern volatile uint16_t ADC_RAW[5];
 
@@ -45,7 +47,8 @@ extern int dis_temperature;
 
 extern uint16_t soc_battery;
 
-extern uint8_t adc_conv_flag;
+/* Flag yang menandakan buffer rata-rata ADC sudah siap dipakai. */
+extern uint8_t flag_adc_conv;
 
 void adc_sampling(void);
 

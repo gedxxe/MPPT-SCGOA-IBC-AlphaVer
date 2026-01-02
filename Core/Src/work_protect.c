@@ -1,13 +1,12 @@
 #include "main.h"
 
-ErrorStatus_e mpptError = 0;
+ErrorStatus_e mpptError = 0; /* Status fault global untuk UI/MPPT. */
 
-//uint8_t flag_charge_allow	= 0;
-uint8_t flag_charge_allow	= 1;
-uint8_t count_wait_charge	= 0;
+uint8_t count_wait_charge	= 0; /* Debounce waktu sebelum relay baterai ON. */
 
 
 void work_protect_charging() {
+	/* Kendali kipas sederhana berbasis suhu display. */
 	if (dis_temperature > 25) {
 		HAL_GPIO_WritePin(FAN_PIN_GPIO_Port, FAN_PIN_Pin, GPIO_PIN_SET);
 	} else if (dis_temperature < 35) {
@@ -15,16 +14,16 @@ void work_protect_charging() {
 	}
 	//Proteksi lainnya
 	if (dis_voltage_bat > BATTERY_PROTECT_VOLT) {
-		mpptError = BAT_HIGH;
+		mpptError = BAT_HIGH;        /* Tegangan baterai terlalu tinggi. */
 	}
 	else if (dis_current_bat > BATTERY_PROTECT_CURRENT) {
-		mpptError = CURRENT_HIGH;
+		mpptError = CURRENT_HIGH;    /* Arus baterai melewati batas aman. */
 	}
 	else if (dis_voltage_pv > PV_PROTECT_VOLT) {
-		mpptError = INPUT_HIGH;
+		mpptError = INPUT_HIGH;      /* Tegangan input PV berlebih. */
 	}
 	else {
-		mpptError = NO_ERROR;
+		mpptError = NO_ERROR;        /* Tidak ada fault terdeteksi. */
 	}
 
 	//Memyalakan relay dan mulai algoritma charging
@@ -35,14 +34,13 @@ void work_protect_charging() {
 #ifdef POWER_TEST
 		if (dis_voltage_pv >= 80) {
 #endif
-		HAL_GPIO_WritePin(RLY_PV_PIN_GPIO_Port, RLY_PV_PIN_Pin, GPIO_PIN_SET);
+			HAL_GPIO_WritePin(RLY_PV_PIN_GPIO_Port, RLY_PV_PIN_Pin, GPIO_PIN_SET);
 
-		count_wait_charge++;
+		count_wait_charge++; /* Tambah counter untuk menunggu relay stabil. */
 		if (count_wait_charge >= 6) {
-			//PWM_VALUE = 0;
 			HAL_GPIO_WritePin(RLY_BAT_PIN_GPIO_Port, RLY_BAT_PIN_Pin, GPIO_PIN_SET);
 
-			// Flag untuk memulai charging dengan state awal berbasis SOC
+			/* Jalankan inisialisasi charging sekali setelah relay ON. */
 			if (!flag_enter_charge) {
 				check_initial_state();
 			}
@@ -52,10 +50,11 @@ void work_protect_charging() {
 		HAL_GPIO_WritePin(RLY_PV_PIN_GPIO_Port, RLY_PV_PIN_Pin, GPIO_PIN_RESET);
 		HAL_GPIO_WritePin(RLY_BAT_PIN_GPIO_Port, RLY_BAT_PIN_Pin, GPIO_PIN_RESET);
 
+		/* Matikan seluruh state charging saat input tidak memenuhi. */
 		flag_enter_charge = 0;
 		flag_charging_Bulk = 0;
 		flag_charging_CV = 0;
 
-		MPPT_Hybrid_Reset(); // Tambahan baru
+		MPPT_Hybrid_Reset(); // Bersihkan state internal MPPT.
 	}
 }
