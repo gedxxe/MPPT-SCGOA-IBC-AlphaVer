@@ -697,13 +697,7 @@ static inline uint16_t cnt_updown(uint16_t cnt, uint8_t ok, uint16_t cnt_max)
 
 void charging_flow(void)
 {
-    if (!(flag_adc_done && flag_enter_charge)) {
-        return;
-    }
-
-#ifdef CHARGING_TEST
-
-    /* timers persist */
+    /* timers persist across calls */
     static uint16_t t_enter_cv    = 0;
     static uint16_t t_to_float    = 0;
     static uint16_t t_bulk_float  = 0;
@@ -714,10 +708,44 @@ void charging_flow(void)
     static uint32_t t_flow_ticks      = 0;
     static uint32_t t_abs_enter_ticks = 0;
 
+    if (!(flag_adc_done && flag_enter_charge)) {
+        /* pastikan counter transisi tidak nyangkut saat charging tidak aktif */
+        t_enter_cv   = 0;
+        t_to_float   = 0;
+        t_bulk_float = 0;
+        t_rebulk     = 0;
+
+        flag_adc_done = 0;
+        return;
+    }
+
     /* baca sensor */
     uint16_t Vbat = dis_voltage_bat;   // 0.1V
     uint16_t Ibat = dis_current_bat;   // 0.1A
     t_flow_ticks++;                    // tiap 10 ms
+
+    /* standby jika input PV/PSU benar-benar tidak ada */
+    uint8_t pv_absent = (dis_voltage_pv <= PV_LOSS_V_TH) && (dis_current_pv <= PV_LOSS_I_TH);
+    if (pv_absent) {
+        flag_charging_Bulk  = 0;
+        flag_charging_CV    = 0;
+        flag_charging_FLOAT = 0;
+        flag_enter_charge   = 0;
+
+        PWM_VALUE    = 0;
+        duty_cycle   = 0;
+        duty_percent = 0;
+
+        MPPT_Hybrid_Reset();
+
+        t_enter_cv   = 0;
+        t_to_float   = 0;
+        t_bulk_float = 0;
+        t_rebulk     = 0;
+
+        flag_adc_done = 0;
+        return;
+    }
 
     /* ===================== STAGE 1: BULK (MPPT) ===================== */
     if (flag_charging_Bulk)
@@ -848,78 +876,5 @@ void charging_flow(void)
         }
     }
 
-#endif
-
     flag_adc_done = 0;
 }
-
-
-/* ====KODE LAMA====
-void charging_flow() {
-	if (flag_adc_done && flag_enter_charge) {
-
-#ifdef CHARGING_TEST
-		// Charging Bulk
-		if (flag_charging_Bulk) {
-			//MPPT_GOA_PNO_Asym_Hybrid();
-			//MPPT_GOA_Pure_NoPS();
-			//MPPT_Hybrid();
-			MPPT_PnO();
-
-			if (dis_current_bat > MAX_CURRENT_CHARGE || dis_voltage_bat > MAX_BATTERY_CHARGE) {
-				//duty_GOA_update--;
-				PWM_VALUE--;
-			}
-			else {
-				PWM_VALUE = PWM_VALUE;
-			}
-
-			//memasuki charging CV
-			if (dis_voltage_bat >= MAX_BATTERY_CHARGE) {
-				//menunggu 10 detik
-				count_charging_CV++;
-				if (count_charging_CV > 2000) {
-					flag_charging_Bulk = 0;
-					flag_charging_CV = 1;
-
-					count_charging_CV = 0;
-				}
-			}
-			else {
-				count_charging_CV = 0;
-			}
-		}
-
-		if (flag_charging_CV){
-			if (dis_voltage_bat <= MAX_BATTERY_CHARGE) {
-				//duty_GOA_update++;
-				PWM_VALUE++;
-			}
-			else {
-				//duty_GOA_update--;
-				PWM_VALUE--;
-			}
-
-			//Jika Baterai turun 0,3V dan arus naik ke 0,5A
-			if((dis_voltage_bat <= (MAX_BATTERY_CHARGE - 5)) || (dis_current_bat >= 10)) {
-				flag_charging_Bulk = 1;
-				flag_charging_CV = 0;
-			}
-		}
-#endif
-
-#ifdef POWER_TEST
-		MPPT_PnO();
-#endif
-
-		//update nilai PWM
-		//if(duty_GOA_update >= MAX_PERIOD) duty_GOA_update = MAX_PERIOD;
-		//if(duty_GOA_update <= 0) duty_GOA_update = 0;
-
-		//PWM_VALUE = duty_GOA_update;
-
-		//reset flag_adc_done supaya menunggu ADC selesai mengonversi
-		flag_adc_done = 0;
-	}
-}
-*/
