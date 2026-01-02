@@ -14,19 +14,6 @@ uint16_t prevPowerInput		= 0;
 uint16_t prevVoltagePv		= 0;
 
 
-// =============================== KODE TUNE ABSORP DAN FLOAT
-
-/* ---------------- helper: duty clamp aman ---------------- */
-static inline void pwm_inc(void)
-{
-    if (PWM_VALUE < MAX_PERIOD) PWM_VALUE++;
-}
-static inline void pwm_dec(void)
-{
-    if (PWM_VALUE > 0) PWM_VALUE--;
-}
-// ========================END
-
 //=======================================================
 /* ============================================================
  *  MPPT Hybrid (PnO Startup -> GOA refine) - STM32
