@@ -14,19 +14,6 @@ uint16_t prevPowerInput		= 0;
 uint16_t prevVoltagePv		= 0;
 
 
-// =============================== KODE TUNE ABSORP DAN FLOAT
-
-/* ---------------- helper: duty clamp aman ---------------- */
-static inline void pwm_inc(void)
-{
-    if (PWM_VALUE < MAX_PERIOD) PWM_VALUE++;
-}
-static inline void pwm_dec(void)
-{
-    if (PWM_VALUE > 0) PWM_VALUE--;
-}
-// ========================END
-
 //=======================================================
 /* ============================================================
  *  MPPT Hybrid (PnO Startup -> GOA refine) - STM32
@@ -200,22 +187,6 @@ void MPPT_Hybrid_Reset(void)
 #include "adc_sampling.h"   // extern uint16_t dis_voltage_pv, dis_current_pv;
 #include "pwm.h"            // extern uint16_t PWM_VALUE; extern int duty_percent; #define MAX_PERIOD ...
 
-// Logika Startup (Inisialisasi)
-void check_initial_state() {
-	flag_enter_charge = 1; // Izinkan pengisian berjalan
-
-	if (dis_voltage_bat < MAX_BATTERY_CHARGE) {
-		flag_charging_Bulk  = 1;  // Mulai dari MPPT jika baterai belum penuh
-		flag_charging_CV    = 0;
-		flag_charging_FLOAT = 0;
-	} else {
-		flag_charging_Bulk  = 0;
-		flag_charging_CV    = 0;
-		flag_charging_FLOAT = 1; // Langsung Float jika baterai sudah penuh
-	}
-}
-
-// ==========================================
 /* ============================================================
  *  MPPT HYBRID MAIN
  * ============================================================ */
