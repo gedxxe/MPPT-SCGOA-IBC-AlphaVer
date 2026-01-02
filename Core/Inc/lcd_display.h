@@ -22,7 +22,7 @@ extern u8g2_t display;
 
 void lcd_init(void);
 void DisplayRabbitAnimation(void);
-void lcd_print_unit(uint8_t col, uint8_t row, uint16_t data, UnitLcd_e uint);
+void lcd_print_unit(uint8_t col, uint8_t row, uint16_t data, UnitLcd_e unit);
 void lcd_main_display(void);
 
 #endif
