@@ -678,10 +678,11 @@ void MPPT_PnO(void) {
 #define V_REBULK            REBULK_VOLTAGE   // pakai define kamu (25.5V)
 
 /* ---------- Timer ticks (10ms per tick) ---------- */
-#define T_ENTER_CV_TICKS    100u   // 1.0s
+#define T_ENTER_CV_TICKS    1000u  // 10.0s (hindari flapping)
 #define T_TO_FLOAT_TICKS    100u   // 1.0s
 #define T_BULK_FLOAT_TICKS  300u   // 3.0s (cukup 3–10 detik sesuai request)
 #define T_REBULK_TICKS      500u   // 5.0s
+#define T_ABS_MIN_DWELL_TICKS 3000u // 30.0s minimum di absorption sebelum keluar
 
 /* ---------- helper counter anti noise (naik cepat, turun pelan) ---------- */
 static inline uint16_t cnt_updown(uint16_t cnt, uint8_t ok, uint16_t cnt_max)
@@ -707,10 +708,16 @@ void charging_flow(void)
     static uint16_t t_to_float    = 0;
     static uint16_t t_bulk_float  = 0;
     static uint16_t t_rebulk      = 0;
+    static uint16_t t_abs_dwell   = 0;
+
+    /* timestamp 10ms tick untuk catat waktu masuk CV */
+    static uint32_t t_flow_ticks      = 0;
+    static uint32_t t_abs_enter_ticks = 0;
 
     /* baca sensor */
     uint16_t Vbat = dis_voltage_bat;   // 0.1V
     uint16_t Ibat = dis_current_bat;   // 0.1A
+    t_flow_ticks++;                    // tiap 10 ms
 
     /* ===================== STAGE 1: BULK (MPPT) ===================== */
     if (flag_charging_Bulk)
@@ -718,7 +725,8 @@ void charging_flow(void)
         MPPT_Hybrid();  // atau MPPT_PnO() untuk test A/B
 
         /* A) Masuk CV kalau Vbat cukup tinggi dan arus masih ada */
-        uint8_t ok_enter_cv = (Vbat >= VABS_ENTER_MIN) && (Ibat >= I_MIN_TO_ENTER_CV);
+        uint8_t ok_voltage_cv = (Vbat >= VABS_ENTER_MIN);
+        uint8_t ok_enter_cv   = ok_voltage_cv && (Ibat >= I_MIN_TO_ENTER_CV); // arus hanya untuk memastikan masih charging
         t_enter_cv = cnt_updown(t_enter_cv, ok_enter_cv, T_ENTER_CV_TICKS);
 
         if (t_enter_cv >= T_ENTER_CV_TICKS) {
@@ -731,6 +739,8 @@ void charging_flow(void)
             t_to_float   = 0;
             t_bulk_float = 0;
             t_rebulk     = 0;
+            t_abs_dwell  = 0;
+            t_abs_enter_ticks = t_flow_ticks;
 
             /* reset MPPT state biar nggak nyangkut kalau nanti balik BULK */
             MPPT_Hybrid_Reset();
@@ -759,6 +769,9 @@ void charging_flow(void)
     /* ===================== STAGE 2: ABSORPTION (CV) ===================== */
     else if (flag_charging_CV)
     {
+        /* hitung durasi berada di CV (10ms tick) dari timestamp masuk */
+        t_abs_dwell = (uint16_t)(t_flow_ticks - t_abs_enter_ticks);
+
         /* kontrol CV dengan hysteresis */
         if (Vbat < (uint16_t)(VABS_SET - VABS_HYST)) {
             if (PWM_VALUE < MAX_PERIOD) PWM_VALUE++;
@@ -777,9 +790,16 @@ void charging_flow(void)
         /* Masuk FLOAT kalau:
            - Vbat tetap tinggi (>= 28.4V)
            - arus sudah kecil (<= 0.3A)
+           - sudah cukup lama di absorption (anti loncat cepat)
            stabil 5 detik (pakai counter anti noise) */
         uint8_t ok_to_float = (Vbat >= VABS_ENTER_MIN) && (Ibat <= I_END_ABS);
-        t_to_float = cnt_updown(t_to_float, ok_to_float, T_TO_FLOAT_TICKS);
+        uint8_t dwell_met   = (t_abs_dwell >= T_ABS_MIN_DWELL_TICKS);
+
+        if (dwell_met) {
+            t_to_float = cnt_updown(t_to_float, ok_to_float, T_TO_FLOAT_TICKS);
+        } else {
+            t_to_float = 0;
+        }
 
         if (t_to_float >= T_TO_FLOAT_TICKS) {
             flag_charging_Bulk  = 0;
@@ -788,6 +808,7 @@ void charging_flow(void)
 
             t_to_float = 0;
             t_rebulk   = 0;
+            t_abs_dwell = 0;
         }
     }
 
@@ -902,4 +923,3 @@ void charging_flow() {
 	}
 }
 */
-
