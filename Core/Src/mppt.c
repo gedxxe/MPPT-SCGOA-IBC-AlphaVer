@@ -1,6 +1,5 @@
 #include "main.h"
 #include <math.h>
-#include <stdlib.h>
 
 /* Flag state FLOAT; dipisah agar mudah dicek oleh UI/pengendali. */
 uint8_t flag_charging_FLOAT = 0;
