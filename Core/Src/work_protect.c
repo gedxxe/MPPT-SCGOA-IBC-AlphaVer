@@ -42,10 +42,10 @@ void work_protect_charging() {
 			//PWM_VALUE = 0;
 			HAL_GPIO_WritePin(RLY_BAT_PIN_GPIO_Port, RLY_BAT_PIN_Pin, GPIO_PIN_SET);
 
-			//flag untu memulai charging dalam stage bulk dan menyalakan PWM,
-			flag_enter_charge = 1;
-			flag_charging_Bulk = 1;
-			flag_charging_CV = 0;
+			// Flag untuk memulai charging dengan state awal berbasis SOC
+			if (!flag_enter_charge) {
+				check_initial_state();
+			}
 		}
 	}
 	else {

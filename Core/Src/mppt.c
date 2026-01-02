@@ -207,15 +207,17 @@ void MPPT_Hybrid_Reset(void)
 
 // Logika Startup (Inisialisasi)
 void check_initial_state() {
-    flag_enter_charge = 1; // Izinkan pengisian berjalan
+	flag_enter_charge = 1; // Izinkan pengisian berjalan
 
-    if (dis_voltage_bat < MAX_BATTERY_CHARGE) {
-        flag_charging_Bulk = 1;  // Mulai dari MPPT jika baterai belum penuh
-        flag_charging_CV = 0;
-        flag_charging_FLOAT = 0;
-    } else {
-        flag_charging_FLOAT = 1; // Langsung Float jika baterai sudah penuh
-    }
+	if (dis_voltage_bat < MAX_BATTERY_CHARGE) {
+		flag_charging_Bulk  = 1;  // Mulai dari MPPT jika baterai belum penuh
+		flag_charging_CV    = 0;
+		flag_charging_FLOAT = 0;
+	} else {
+		flag_charging_Bulk  = 0;
+		flag_charging_CV    = 0;
+		flag_charging_FLOAT = 1; // Langsung Float jika baterai sudah penuh
+	}
 }
 
 // ==========================================
