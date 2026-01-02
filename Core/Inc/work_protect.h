@@ -13,7 +13,6 @@ typedef enum {
 } ErrorStatus_e;
 
 extern ErrorStatus_e mpptError;
-extern uint8_t flag_charge_allow;
 
 void work_protect_charging(void);
 

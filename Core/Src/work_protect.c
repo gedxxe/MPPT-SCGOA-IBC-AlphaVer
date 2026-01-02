@@ -2,8 +2,6 @@
 
 ErrorStatus_e mpptError = 0;
 
-//uint8_t flag_charge_allow	= 0;
-uint8_t flag_charge_allow	= 1;
 uint8_t count_wait_charge	= 0;
 
 
