@@ -45,7 +45,7 @@ extern int dis_temperature;
 
 extern uint16_t soc_battery;
 
-extern uint8_t adc_conv_flag;
+extern uint8_t flag_adc_conv;
 
 void adc_sampling(void);
 

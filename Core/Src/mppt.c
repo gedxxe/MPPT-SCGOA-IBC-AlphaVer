@@ -667,6 +667,41 @@ static inline uint16_t cnt_updown(uint16_t cnt, uint8_t ok, uint16_t cnt_max)
     return cnt;
 }
 
+/* ============================================================
+ *  INITIAL STATE SELECTION (dipanggil saat relay bat di-on-kan)
+ *  Menentukan titik awal charging berdasarkan tegangan baterai.
+ * ============================================================ */
+void check_initial_state(void)
+{
+    /* reset seluruh mesin MPPT */
+    MPPT_Hybrid_Reset();
+
+    /* default: matikan semua state dulu */
+    flag_charging_Bulk  = 0;
+    flag_charging_CV    = 0;
+    flag_charging_FLOAT = 0;
+
+    /* pembacaan dalam unit display (0.1V) */
+    uint16_t Vbat = dis_voltage_bat;
+
+    if (Vbat >= VFLT_SET) {
+        /* baterai sudah tinggi -> langsung FLOAT */
+        flag_charging_FLOAT = 1;
+    } else if (Vbat >= VABS_ENTER_MIN) {
+        /* mendekati absorption -> mulai di CV */
+        flag_charging_CV = 1;
+    } else {
+        /* default: mulai BULK (MPPT) */
+        flag_charging_Bulk = 1;
+        PWM_VALUE    = 0;
+        duty_cycle   = 0;
+        duty_percent = 0;
+    }
+
+    /* izinkan charging */
+    flag_enter_charge = 1;
+}
+
 void charging_flow(void)
 {
     /* timers persist across calls */
