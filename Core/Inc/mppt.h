@@ -12,6 +12,7 @@ extern uint8_t flag_charging_FLOAT;
 
 void MPPT_Hybrid(void);
 void MPPT_Hybrid_Reset(void);
+void check_initial_state(void);
 void charging_flow(void);
 
 #endif
