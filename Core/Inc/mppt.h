@@ -5,7 +5,6 @@
 
 extern uint8_t flag_adc_done;
 extern uint8_t flag_enter_charge;
-extern uint16_t duty_GOA_update;
 
 extern uint8_t flag_charging_Bulk;
 extern uint8_t flag_charging_CV;

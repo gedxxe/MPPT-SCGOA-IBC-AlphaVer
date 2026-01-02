@@ -3,17 +3,12 @@
 #include <stdlib.h>
 
 uint8_t flag_charging_FLOAT = 0;
-uint16_t count_float_stable = 0;
 
 uint8_t flag_adc_done		= 0;
 uint8_t flag_enter_charge	= 0;
 
-uint16_t duty_GOA_update	= 0;
-
 uint8_t flag_charging_Bulk 	= 0;
 uint8_t flag_charging_CV	= 0;
-
-uint16_t count_charging_CV	= 0;
 
 uint16_t prevPowerInput		= 0;
 uint16_t prevVoltagePv		= 0;
