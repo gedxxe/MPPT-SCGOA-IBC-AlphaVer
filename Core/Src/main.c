@@ -57,7 +57,6 @@ uint8_t count_10mS	= 0;
 uint8_t count_100mS	= 0;
 uint8_t count_500mS	= 0;
 uint8_t count_1S	= 0;
-uint8_t count_2S	= 0;
 
 typedef struct { // Membuat flag untuk pewaktu
 	uint8_t flag_1mS;
@@ -66,7 +65,6 @@ typedef struct { // Membuat flag untuk pewaktu
 	uint8_t flag_100mS;
 	uint8_t flag_500mS;
 	uint8_t flag_1S;
-	uint8_t flag_2S;
 } time_base_t;
 
 time_base_t timeSch;
@@ -177,9 +175,6 @@ int main(void)
 		  timeSch.flag_1S = 0;
 		  HAL_GPIO_TogglePin(LED_RUN_PIN_GPIO_Port, LED_RUN_PIN_Pin);
 
-	  }
-	  if (timeSch.flag_2S) {
-		  timeSch.flag_2S = 0;
 	  }
     /* USER CODE END WHILE */
 
@@ -579,12 +574,7 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim) {
 		}
 		if (count_1S >= 2) {
 			timeSch.flag_1S = 1;
-			count_2S++;
 			count_1S = 0;
-		}
-		if (count_2S >= 2) {
-			timeSch.flag_2S = 1;
-			count_2S = 0;
 		}
 
 	}

@@ -1,36 +1,22 @@
 #include "main.h"
 #include <math.h>
-#include <stdlib.h>
 
+/* Flag state FLOAT; dipisah agar mudah dicek oleh UI/pengendali. */
 uint8_t flag_charging_FLOAT = 0;
-uint16_t count_float_stable = 0;
 
+/* Flag data ADC baru tersedia (disetel di adc_sampling.c). */
 uint8_t flag_adc_done		= 0;
+/* Flag bahwa charging boleh berjalan (dinyalakan setelah relay siap). */
 uint8_t flag_enter_charge	= 0;
 
-uint16_t duty_GOA_update	= 0;
-
+/* Flag tahapan charging aktif. */
 uint8_t flag_charging_Bulk 	= 0;
 uint8_t flag_charging_CV	= 0;
 
-uint16_t count_charging_CV	= 0;
-
+/* Memori PnO untuk membandingkan daya/tegangan langkah sebelumnya. */
 uint16_t prevPowerInput		= 0;
 uint16_t prevVoltagePv		= 0;
 
-
-// =============================== KODE TUNE ABSORP DAN FLOAT
-
-/* ---------------- helper: duty clamp aman ---------------- */
-static inline void pwm_inc(void)
-{
-    if (PWM_VALUE < MAX_PERIOD) PWM_VALUE++;
-}
-static inline void pwm_dec(void)
-{
-    if (PWM_VALUE > 0) PWM_VALUE--;
-}
-// ========================END
 
 //=======================================================
 /* ============================================================
@@ -39,6 +25,17 @@ static inline void pwm_dec(void)
  *  - PnO yang kamu punya dipakai untuk "bring-up conduction"
  *    (karena PnO kamu terbukti robust di hardware).
  *  - GOA dipakai setelah arus benar-benar sudah masuk (konduksi).
+ *
+ *  REVIEW & HW-NOTES (2024-xx):
+ *  - Loop 10 ms tidak mengandung blocking/malloc; satu-satunya jitter
+ *    berasal dari RNG metaheuristik (sengaja). ISR ADC -> flag_adc_done
+ *    sudah jadi gating utama.
+ *  - Risiko wrap duty saat decrement PnO (uint16 underflow) diperbaiki
+ *    dengan saturating-decrement agar tidak loncat ke MAX_PERIOD.
+ *  - PnO hanya starter/anchor; setelah handover ke GOA tidak ada
+ *    rollback kecuali PV/input benar-benar hilang (lihat reset).
+ *  - State PnO (prev power/voltage) ikut di-reset supaya handoff antar
+ *    siklus bersih dan deterministik.
  *
  *  KUNCI FIX dibanding versi bug:
  *  (1) PWM_VALUE dijadikan source of truth duty.
@@ -173,24 +170,34 @@ static uint16_t Dold_pwm = 0;
  * ============================================================ */
 void MPPT_Hybrid_Reset(void)
 {
+    /* Tandai perlu inisialisasi ulang pada pemanggilan berikutnya. */
     hyb_isInit     = 0;
+    /* Mulai lagi dari fase PnO agar konduksi aman. */
     pno_active     = 1;
+    /* Hapus debounce PV loss & konduksi. */
     pv_loss_cnt    = 0;
     cond_cnt       = 0;
 
+    /* Reset mesin GOA ke siklus awal. */
     state_goa      = 1;
     goat_idx       = 1;
     prev_goat_idx  = 0;
     conv_counter   = 0;
     t_goa          = 1;
 
+    /* Bersihkan akumulator evaluasi fitness. */
     eval_holding   = 0;
     eval_settle    = 0;
     eval_avg_cnt   = 0;
     eval_sumP      = 0;
 
+    /* Reset solusi terbaik ke batas bawah duty. */
     gbest_P        = 0.0f;
     gbest_D        = DUTY_LB_F;
+
+    /* Reset memori PnO supaya tidak bawa sejarah tegangan/daya lama. */
+    prevPowerInput = 0;
+    prevVoltagePv  = 0;
 
     /* NOTE:
      * Jangan paksa PWM_VALUE=0 di reset function kalau kamu panggil reset
@@ -205,20 +212,6 @@ void MPPT_Hybrid_Reset(void)
 #include "adc_sampling.h"   // extern uint16_t dis_voltage_pv, dis_current_pv;
 #include "pwm.h"            // extern uint16_t PWM_VALUE; extern int duty_percent; #define MAX_PERIOD ...
 
-// Logika Startup (Inisialisasi)
-void check_initial_state() {
-    flag_enter_charge = 1; // Izinkan pengisian berjalan
-
-    if (dis_voltage_bat < MAX_BATTERY_CHARGE) {
-        flag_charging_Bulk = 1;  // Mulai dari MPPT jika baterai belum penuh
-        flag_charging_CV = 0;
-        flag_charging_FLOAT = 0;
-    } else {
-        flag_charging_FLOAT = 1; // Langsung Float jika baterai sudah penuh
-    }
-}
-
-// ==========================================
 /* ============================================================
  *  MPPT HYBRID MAIN
  * ============================================================ */
@@ -230,6 +223,7 @@ void MPPT_Hybrid(void)
      *    saat PSU dimatiin / relay off.
      * ======================================================== */
     if (!flag_enter_charge || !flag_charging_Bulk) {
+        /* Jika charging tidak diizinkan, jaga state bersih lalu keluar. */
         MPPT_Hybrid_Reset();
         return;
     }
@@ -237,10 +231,10 @@ void MPPT_Hybrid(void)
     /* ========================================================
      * 1) Ambil data sensor (DISPLAY SCALED, konsisten dengan PnO)
      * ======================================================== */
-    uint16_t Vpv  = dis_voltage_pv;
-    uint16_t Ipv  = dis_current_pv;
-    uint16_t Vbat = dis_voltage_bat;
-    uint16_t Ibat = dis_current_bat;
+    uint16_t Vpv  = dis_voltage_pv;  /* Tegangan PV display-scaled. */
+    uint16_t Ipv  = dis_current_pv;  /* Arus PV display-scaled. */
+    uint16_t Vbat = dis_voltage_bat; /* Tegangan baterai display-scaled. */
+    uint16_t Ibat = dis_current_bat; /* Arus baterai display-scaled. */
 
     /* Hitung power 32-bit aman (tidak overflow) */
     uint32_t Ppv32 = (uint32_t)Vpv * (uint32_t)Ipv;
@@ -259,12 +253,12 @@ void MPPT_Hybrid(void)
 
     if (pv_loss_cnt >= PV_LOSS_COUNT_N) {
         /* PV benar-benar hilang -> matikan PWM + reset state */
-        PWM_VALUE = 0;
-        duty_cycle = 0;
-        duty_percent = 0;
+        PWM_VALUE = 0;        /* Matikan PWM fisik. */
+        duty_cycle = 0;       /* Sinkron duty internal. */
+        duty_percent = 0;     /* Nol-kan persentase untuk UI. */
 
-        MPPT_Hybrid_Reset();
-        pv_loss_cnt = 0;
+        MPPT_Hybrid_Reset();  /* Bersihkan state algoritma. */
+        pv_loss_cnt = 0;      /* Reset debounce agar siap deteksi ulang. */
         return;
     }
 
@@ -272,28 +266,30 @@ void MPPT_Hybrid(void)
      * 3) Sinkronisasi DUTY (FIX paling krusial)
      *    PWM_VALUE harus jadi satu-satunya truth.
      * ======================================================== */
-    duty_cycle = PWM_VALUE;          // sync sebelum update algorithm
+    duty_cycle = PWM_VALUE;          /* Sinkron duty internal dengan nilai PWM terakhir. */
 
     /* ========================================================
      * 4) Proteksi charge (ikut gaya robust PnO kamu)
      *    Kalau overcurrent/overvoltage -> turunin duty 1 step dan keluar.
      * ======================================================== */
     if (dis_current_bat > MAX_CURRENT_CHARGE) {
+        /* Kurangi duty satu langkah untuk meredam arus berlebih. */
         if (duty_cycle > 0) duty_cycle--;
         PWM_VALUE = duty_cycle;
         duty_percent = (PWM_VALUE * 100) / MAX_PERIOD;
 
-        /* Saat proteksi aktif, jangan biarkan GOA “berantem”.
-           Paksa balik ke PnO setelah proteksi reda. */
+        /* Balik ke PnO agar stabil setelah kondisi aman. */
         pno_active = 1;
         cond_cnt = 0;
         return;
     }
     if (dis_voltage_bat > MAX_BATTERY_CHARGE) {
+        /* Turunkan duty jika tegangan baterai melewati batas bulk. */
         if (duty_cycle > 0) duty_cycle--;
         PWM_VALUE = duty_cycle;
         duty_percent = (PWM_VALUE * 100) / MAX_PERIOD;
 
+        /* Reset gating konduksi agar GOA tidak aktif saat proteksi. */
         pno_active = 1;
         cond_cnt = 0;
         return;
@@ -625,26 +621,32 @@ void MPPT_Hybrid(void)
 // =============================================================
 
 
+/* Perturb-and-Observe sederhana untuk fase startup/anti-stuck. */
 void MPPT_PnO(void) {
-	//duty=duty_cycle;
-	if(dis_current_bat > MAX_CURRENT_CHARGE)		{duty_cycle--;}
-	else if(dis_voltage_bat > MAX_BATTERY_CHARGE)	{duty_cycle--;}
+	/* Proteksi cepat berbasis arus/tegangan baterai. */
+	if(dis_current_bat > MAX_CURRENT_CHARGE)		{ if (duty_cycle > 0) duty_cycle--; }
+	else if(dis_voltage_bat > MAX_BATTERY_CHARGE)	{ if (duty_cycle > 0) duty_cycle--; }
 	else {
-		if(dis_power_pv > prevPowerInput && dis_voltage_pv > prevVoltagePv)		{duty_cycle--;}
-		else if(dis_power_pv > prevPowerInput && dis_voltage_pv < prevVoltagePv)	{duty_cycle++;}
-		else if(dis_power_pv < prevPowerInput && dis_voltage_pv > prevVoltagePv)	{duty_cycle++;}
-		else if(dis_power_pv < prevPowerInput && dis_voltage_pv < prevVoltagePv)	{duty_cycle--;}
-		else if(dis_voltage_bat < MAX_BATTERY_CHARGE)								{duty_cycle++;}
+		/* Bandingkan daya/tegangan saat ini dengan sebelumnya
+		 * untuk memutuskan arah perturbasi duty. */
+		if(dis_power_pv > prevPowerInput && dis_voltage_pv > prevVoltagePv)		{ if (duty_cycle > 0) duty_cycle--; }
+		else if(dis_power_pv > prevPowerInput && dis_voltage_pv < prevVoltagePv)	{ duty_cycle++; }
+		else if(dis_power_pv < prevPowerInput && dis_voltage_pv > prevVoltagePv)	{ duty_cycle++; }
+		else if(dis_power_pv < prevPowerInput && dis_voltage_pv < prevVoltagePv)	{ if (duty_cycle > 0) duty_cycle--; }
+		else if(dis_voltage_bat < MAX_BATTERY_CHARGE)								{ duty_cycle++; }
 
+		/* Simpan daya/tegangan sebagai referensi langkah berikutnya. */
 		prevPowerInput = dis_power_pv;
 		prevVoltagePv = dis_voltage_pv;
 	}
+	/* Jaga duty dalam batas PWM yang diizinkan. */
 	if(duty_cycle >= MAX_PERIOD) {
 		duty_cycle = MAX_PERIOD;
 	}
 	else if(duty_cycle <= 0) {
 		duty_cycle = 0;
 	}
+	/* Propagasi hasil perturbasi ke register PWM & persen untuk UI. */
 	PWM_VALUE = duty_cycle;
 	duty_percent = (PWM_VALUE * 100) / MAX_PERIOD;
 }
@@ -657,7 +659,11 @@ void MPPT_PnO(void) {
  *  Transisi pakai hysteresis + "counter naik/turun" (anti noise)
  * ============================================================ */
 
-/* ---------- ABSORPTION (24V VRLA) ---------- */
+/* ---------- ABSORPTION (24V VRLA, 2x12V 7Ah) ----------
+ * Tegangan/arus berbasis unit tampilan (0.1V / 0.1A).
+ * Hysteresis + counter dipakai untuk meredam ripple sensing kecil
+ * supaya tidak membatalkan perpindahan state.
+ */
 #define VABS_SET            288u   // 28.8V
 #define VABS_ENTER_MIN      284u   // 28.4V (lebih realistis untuk "mulai CV")
 #define VABS_HYST           4u     // 0.4V band (anti hunting)
@@ -666,7 +672,7 @@ void MPPT_PnO(void) {
 #define VFLT_SET            272u   // 27.2V
 #define VFLT_HYST           3u     // 0.3V
 
-/* ---------- Current thresholds ---------- */
+/* ---------- Current thresholds (max charge 2.2A elsewhere) ---------- */
 #define I_MIN_TO_ENTER_CV   3u     // 0.3A (pastikan memang ada charging)
 #define I_END_ABS           3u     // 0.3A (end current absorption)
 #define I_IDLE              1u     // 0.1A (anggap tidak charging)
@@ -678,10 +684,11 @@ void MPPT_PnO(void) {
 #define V_REBULK            REBULK_VOLTAGE   // pakai define kamu (25.5V)
 
 /* ---------- Timer ticks (10ms per tick) ---------- */
-#define T_ENTER_CV_TICKS    100u   // 1.0s
+#define T_ENTER_CV_TICKS    1000u  // 10.0s (hindari flapping)
 #define T_TO_FLOAT_TICKS    100u   // 1.0s
 #define T_BULK_FLOAT_TICKS  300u   // 3.0s (cukup 3–10 detik sesuai request)
 #define T_REBULK_TICKS      500u   // 5.0s
+#define T_ABS_MIN_DWELL_TICKS 3000u // 30.0s minimum di absorption sebelum keluar
 
 /* ---------- helper counter anti noise (naik cepat, turun pelan) ---------- */
 static inline uint16_t cnt_updown(uint16_t cnt, uint8_t ok, uint16_t cnt_max)
@@ -694,23 +701,92 @@ static inline uint16_t cnt_updown(uint16_t cnt, uint8_t ok, uint16_t cnt_max)
     return cnt;
 }
 
-void charging_flow(void)
+/* ============================================================
+ *  INITIAL STATE SELECTION (dipanggil saat relay bat di-on-kan)
+ *  Menentukan titik awal charging berdasarkan tegangan baterai.
+ * ============================================================ */
+void check_initial_state(void)
 {
-    if (!(flag_adc_done && flag_enter_charge)) {
-        return;
+    /* reset seluruh mesin MPPT */
+    MPPT_Hybrid_Reset();
+
+    /* default: matikan semua state dulu */
+    flag_charging_Bulk  = 0;
+    flag_charging_CV    = 0;
+    flag_charging_FLOAT = 0;
+
+    /* pembacaan dalam unit display (0.1V) */
+    uint16_t Vbat = dis_voltage_bat;
+
+    if (Vbat >= VFLT_SET) {
+        /* baterai sudah tinggi -> langsung FLOAT */
+        flag_charging_FLOAT = 1;
+    } else if (Vbat >= VABS_ENTER_MIN) {
+        /* mendekati absorption -> mulai di CV */
+        flag_charging_CV = 1;
+    } else {
+        /* default: mulai BULK (MPPT) */
+        flag_charging_Bulk = 1;
+        PWM_VALUE    = 0;
+        duty_cycle   = 0;
+        duty_percent = 0;
     }
 
-#ifdef CHARGING_TEST
+    /* izinkan charging */
+    flag_enter_charge = 1;
+}
 
-    /* timers persist */
+void charging_flow(void)
+{
+    /* timers persist across calls */
     static uint16_t t_enter_cv    = 0;
     static uint16_t t_to_float    = 0;
     static uint16_t t_bulk_float  = 0;
     static uint16_t t_rebulk      = 0;
+    static uint16_t t_abs_dwell   = 0;
+
+    /* timestamp 10ms tick untuk catat waktu masuk CV */
+    static uint32_t t_flow_ticks      = 0;
+    static uint32_t t_abs_enter_ticks = 0;
+
+    if (!(flag_adc_done && flag_enter_charge)) {
+        /* pastikan counter transisi tidak nyangkut saat charging tidak aktif */
+        t_enter_cv   = 0;
+        t_to_float   = 0;
+        t_bulk_float = 0;
+        t_rebulk     = 0;
+
+        flag_adc_done = 0;
+        return;
+    }
 
     /* baca sensor */
     uint16_t Vbat = dis_voltage_bat;   // 0.1V
     uint16_t Ibat = dis_current_bat;   // 0.1A
+    t_flow_ticks++;                    // tiap 10 ms
+
+    /* standby jika input PV/PSU benar-benar tidak ada */
+    uint8_t pv_absent = (dis_voltage_pv <= PV_LOSS_V_TH) && (dis_current_pv <= PV_LOSS_I_TH);
+    if (pv_absent) {
+        flag_charging_Bulk  = 0;
+        flag_charging_CV    = 0;
+        flag_charging_FLOAT = 0;
+        flag_enter_charge   = 0;
+
+        PWM_VALUE    = 0;
+        duty_cycle   = 0;
+        duty_percent = 0;
+
+        MPPT_Hybrid_Reset();
+
+        t_enter_cv   = 0;
+        t_to_float   = 0;
+        t_bulk_float = 0;
+        t_rebulk     = 0;
+
+        flag_adc_done = 0;
+        return;
+    }
 
     /* ===================== STAGE 1: BULK (MPPT) ===================== */
     if (flag_charging_Bulk)
@@ -718,7 +794,8 @@ void charging_flow(void)
         MPPT_Hybrid();  // atau MPPT_PnO() untuk test A/B
 
         /* A) Masuk CV kalau Vbat cukup tinggi dan arus masih ada */
-        uint8_t ok_enter_cv = (Vbat >= VABS_ENTER_MIN) && (Ibat >= I_MIN_TO_ENTER_CV);
+        uint8_t ok_voltage_cv = (Vbat >= VABS_ENTER_MIN);
+        uint8_t ok_enter_cv   = ok_voltage_cv && (Ibat >= I_MIN_TO_ENTER_CV); // arus hanya untuk memastikan masih charging
         t_enter_cv = cnt_updown(t_enter_cv, ok_enter_cv, T_ENTER_CV_TICKS);
 
         if (t_enter_cv >= T_ENTER_CV_TICKS) {
@@ -731,6 +808,8 @@ void charging_flow(void)
             t_to_float   = 0;
             t_bulk_float = 0;
             t_rebulk     = 0;
+            t_abs_dwell  = 0;
+            t_abs_enter_ticks = t_flow_ticks;
 
             /* reset MPPT state biar nggak nyangkut kalau nanti balik BULK */
             MPPT_Hybrid_Reset();
@@ -759,6 +838,9 @@ void charging_flow(void)
     /* ===================== STAGE 2: ABSORPTION (CV) ===================== */
     else if (flag_charging_CV)
     {
+        /* hitung durasi berada di CV (10ms tick) dari timestamp masuk */
+        t_abs_dwell = (uint16_t)(t_flow_ticks - t_abs_enter_ticks);
+
         /* kontrol CV dengan hysteresis */
         if (Vbat < (uint16_t)(VABS_SET - VABS_HYST)) {
             if (PWM_VALUE < MAX_PERIOD) PWM_VALUE++;
@@ -777,9 +859,16 @@ void charging_flow(void)
         /* Masuk FLOAT kalau:
            - Vbat tetap tinggi (>= 28.4V)
            - arus sudah kecil (<= 0.3A)
+           - sudah cukup lama di absorption (anti loncat cepat)
            stabil 5 detik (pakai counter anti noise) */
         uint8_t ok_to_float = (Vbat >= VABS_ENTER_MIN) && (Ibat <= I_END_ABS);
-        t_to_float = cnt_updown(t_to_float, ok_to_float, T_TO_FLOAT_TICKS);
+        uint8_t dwell_met   = (t_abs_dwell >= T_ABS_MIN_DWELL_TICKS);
+
+        if (dwell_met) {
+            t_to_float = cnt_updown(t_to_float, ok_to_float, T_TO_FLOAT_TICKS);
+        } else {
+            t_to_float = 0;
+        }
 
         if (t_to_float >= T_TO_FLOAT_TICKS) {
             flag_charging_Bulk  = 0;
@@ -788,6 +877,7 @@ void charging_flow(void)
 
             t_to_float = 0;
             t_rebulk   = 0;
+            t_abs_dwell = 0;
         }
     }
 
@@ -827,79 +917,5 @@ void charging_flow(void)
         }
     }
 
-#endif
-
     flag_adc_done = 0;
 }
-
-
-/* ====KODE LAMA====
-void charging_flow() {
-	if (flag_adc_done && flag_enter_charge) {
-
-#ifdef CHARGING_TEST
-		// Charging Bulk
-		if (flag_charging_Bulk) {
-			//MPPT_GOA_PNO_Asym_Hybrid();
-			//MPPT_GOA_Pure_NoPS();
-			//MPPT_Hybrid();
-			MPPT_PnO();
-
-			if (dis_current_bat > MAX_CURRENT_CHARGE || dis_voltage_bat > MAX_BATTERY_CHARGE) {
-				//duty_GOA_update--;
-				PWM_VALUE--;
-			}
-			else {
-				PWM_VALUE = PWM_VALUE;
-			}
-
-			//memasuki charging CV
-			if (dis_voltage_bat >= MAX_BATTERY_CHARGE) {
-				//menunggu 10 detik
-				count_charging_CV++;
-				if (count_charging_CV > 2000) {
-					flag_charging_Bulk = 0;
-					flag_charging_CV = 1;
-
-					count_charging_CV = 0;
-				}
-			}
-			else {
-				count_charging_CV = 0;
-			}
-		}
-
-		if (flag_charging_CV){
-			if (dis_voltage_bat <= MAX_BATTERY_CHARGE) {
-				//duty_GOA_update++;
-				PWM_VALUE++;
-			}
-			else {
-				//duty_GOA_update--;
-				PWM_VALUE--;
-			}
-
-			//Jika Baterai turun 0,3V dan arus naik ke 0,5A
-			if((dis_voltage_bat <= (MAX_BATTERY_CHARGE - 5)) || (dis_current_bat >= 10)) {
-				flag_charging_Bulk = 1;
-				flag_charging_CV = 0;
-			}
-		}
-#endif
-
-#ifdef POWER_TEST
-		MPPT_PnO();
-#endif
-
-		//update nilai PWM
-		//if(duty_GOA_update >= MAX_PERIOD) duty_GOA_update = MAX_PERIOD;
-		//if(duty_GOA_update <= 0) duty_GOA_update = 0;
-
-		//PWM_VALUE = duty_GOA_update;
-
-		//reset flag_adc_done supaya menunggu ADC selesai mengonversi
-		flag_adc_done = 0;
-	}
-}
-*/
-
