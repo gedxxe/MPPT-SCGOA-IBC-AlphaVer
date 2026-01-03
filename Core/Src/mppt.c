@@ -701,6 +701,18 @@ static inline uint16_t cnt_updown(uint16_t cnt, uint8_t ok, uint16_t cnt_max)
     return cnt;
 }
 
+/* ---------- Charging timers (10 ms tick) ---------- */
+static uint16_t t_enter_cv    = 0;
+static uint16_t t_to_float    = 0;
+static uint16_t t_bulk_float  = 0;
+static uint16_t t_rebulk      = 0;
+static uint16_t t_abs_dwell   = 0;
+static uint16_t t_bulk_highV  = 0;
+
+/* timestamp 10ms tick untuk catat waktu masuk CV */
+static uint32_t t_flow_ticks      = 0;
+static uint32_t t_abs_enter_ticks = 0;
+
 /* ============================================================
  *  INITIAL STATE SELECTION (dipanggil saat relay bat di-on-kan)
  *  Menentukan titik awal charging berdasarkan tegangan baterai.
@@ -724,9 +736,13 @@ void check_initial_state(void)
      *  - 27.5V..28.3V -> FLOAT (baterai sudah tinggi)
      *  - lainnya -> BULK
      */
+    t_flow_ticks      = 0;
+    t_abs_enter_ticks = 0;
+
     if (Vbat >= VABS_ENTER_MIN) {
         /* mendekati/past absorption -> mulai di CV */
         flag_charging_CV = 1;
+        t_abs_enter_ticks = t_flow_ticks;  /* pastikan dwell dihitung dari start CV */
     } else if (Vbat >= 275u) {
         /* baterai sudah tinggi -> langsung FLOAT */
         flag_charging_FLOAT = 1;
@@ -744,23 +760,15 @@ void check_initial_state(void)
 
 void charging_flow(void)
 {
-    /* timers persist across calls */
-    static uint16_t t_enter_cv    = 0;
-    static uint16_t t_to_float    = 0;
-    static uint16_t t_bulk_float  = 0;
-    static uint16_t t_rebulk      = 0;
-    static uint16_t t_abs_dwell   = 0;
-
-    /* timestamp 10ms tick untuk catat waktu masuk CV */
-    static uint32_t t_flow_ticks      = 0;
-    static uint32_t t_abs_enter_ticks = 0;
-
     if (!(flag_adc_done && flag_enter_charge)) {
         /* pastikan counter transisi tidak nyangkut saat charging tidak aktif */
         t_enter_cv   = 0;
         t_to_float   = 0;
         t_bulk_float = 0;
         t_rebulk     = 0;
+        t_bulk_highV = 0;
+        t_flow_ticks = 0;
+        t_abs_enter_ticks = 0;
 
         flag_adc_done = 0;
         return;
@@ -789,6 +797,9 @@ void charging_flow(void)
         t_to_float   = 0;
         t_bulk_float = 0;
         t_rebulk     = 0;
+        t_bulk_highV = 0;
+        t_flow_ticks = 0;
+        t_abs_enter_ticks = 0;
 
         flag_adc_done = 0;
         return;
@@ -826,6 +837,8 @@ void charging_flow(void)
               Stabil 5 detik -> masuk FLOAT */
         uint8_t ok_bulk_float = (Vbat >= V_BULK_TO_FLOAT_MIN) && (Ibat <= I_IDLE);
         t_bulk_float = cnt_updown(t_bulk_float, ok_bulk_float, T_BULK_FLOAT_TICKS);
+        uint8_t ok_bulk_highV = (Vbat > (uint16_t)(VFLT_SET + 5u));
+        t_bulk_highV = cnt_updown(t_bulk_highV, ok_bulk_highV, 3000u); // 30s high-V guard
 
         if (t_bulk_float >= T_BULK_FLOAT_TICKS) {
             flag_charging_Bulk  = 0;
@@ -836,6 +849,22 @@ void charging_flow(void)
             t_enter_cv   = 0;
             t_to_float   = 0;
             t_rebulk     = 0;
+            t_bulk_highV = 0;
+
+            MPPT_Hybrid_Reset();
+        }
+        /* escape hatch jika Vbat tinggi tetapi arus tidak pernah memenuhi syarat CV/FLOAT */
+        else if (t_bulk_highV >= 3000u) {
+            flag_charging_Bulk  = 0;
+            flag_charging_CV    = 0;
+            flag_charging_FLOAT = 1;
+
+            t_bulk_highV = 0;
+            t_bulk_float = 0;
+            t_enter_cv   = 0;
+            t_to_float   = 0;
+            t_rebulk     = 0;
+            t_abs_enter_ticks = t_flow_ticks; // start float timing cleanly
 
             MPPT_Hybrid_Reset();
         }
