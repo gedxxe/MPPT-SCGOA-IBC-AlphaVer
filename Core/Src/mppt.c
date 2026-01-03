@@ -26,6 +26,17 @@ uint16_t prevVoltagePv		= 0;
  *    (karena PnO kamu terbukti robust di hardware).
  *  - GOA dipakai setelah arus benar-benar sudah masuk (konduksi).
  *
+ *  REVIEW & HW-NOTES (2024-xx):
+ *  - Loop 10 ms tidak mengandung blocking/malloc; satu-satunya jitter
+ *    berasal dari RNG metaheuristik (sengaja). ISR ADC -> flag_adc_done
+ *    sudah jadi gating utama.
+ *  - Risiko wrap duty saat decrement PnO (uint16 underflow) diperbaiki
+ *    dengan saturating-decrement agar tidak loncat ke MAX_PERIOD.
+ *  - PnO hanya starter/anchor; setelah handover ke GOA tidak ada
+ *    rollback kecuali PV/input benar-benar hilang (lihat reset).
+ *  - State PnO (prev power/voltage) ikut di-reset supaya handoff antar
+ *    siklus bersih dan deterministik.
+ *
  *  KUNCI FIX dibanding versi bug:
  *  (1) PWM_VALUE dijadikan source of truth duty.
  *      duty_cycle SELALU disinkronkan ke PWM_VALUE sebelum update.
@@ -183,6 +194,10 @@ void MPPT_Hybrid_Reset(void)
     /* Reset solusi terbaik ke batas bawah duty. */
     gbest_P        = 0.0f;
     gbest_D        = DUTY_LB_F;
+
+    /* Reset memori PnO supaya tidak bawa sejarah tegangan/daya lama. */
+    prevPowerInput = 0;
+    prevVoltagePv  = 0;
 
     /* NOTE:
      * Jangan paksa PWM_VALUE=0 di reset function kalau kamu panggil reset
@@ -609,16 +624,16 @@ void MPPT_Hybrid(void)
 /* Perturb-and-Observe sederhana untuk fase startup/anti-stuck. */
 void MPPT_PnO(void) {
 	/* Proteksi cepat berbasis arus/tegangan baterai. */
-	if(dis_current_bat > MAX_CURRENT_CHARGE)		{duty_cycle--;}
-	else if(dis_voltage_bat > MAX_BATTERY_CHARGE)	{duty_cycle--;}
+	if(dis_current_bat > MAX_CURRENT_CHARGE)		{ if (duty_cycle > 0) duty_cycle--; }
+	else if(dis_voltage_bat > MAX_BATTERY_CHARGE)	{ if (duty_cycle > 0) duty_cycle--; }
 	else {
 		/* Bandingkan daya/tegangan saat ini dengan sebelumnya
 		 * untuk memutuskan arah perturbasi duty. */
-		if(dis_power_pv > prevPowerInput && dis_voltage_pv > prevVoltagePv)		{duty_cycle--;}
-		else if(dis_power_pv > prevPowerInput && dis_voltage_pv < prevVoltagePv)	{duty_cycle++;}
-		else if(dis_power_pv < prevPowerInput && dis_voltage_pv > prevVoltagePv)	{duty_cycle++;}
-		else if(dis_power_pv < prevPowerInput && dis_voltage_pv < prevVoltagePv)	{duty_cycle--;}
-		else if(dis_voltage_bat < MAX_BATTERY_CHARGE)								{duty_cycle++;}
+		if(dis_power_pv > prevPowerInput && dis_voltage_pv > prevVoltagePv)		{ if (duty_cycle > 0) duty_cycle--; }
+		else if(dis_power_pv > prevPowerInput && dis_voltage_pv < prevVoltagePv)	{ duty_cycle++; }
+		else if(dis_power_pv < prevPowerInput && dis_voltage_pv > prevVoltagePv)	{ duty_cycle++; }
+		else if(dis_power_pv < prevPowerInput && dis_voltage_pv < prevVoltagePv)	{ if (duty_cycle > 0) duty_cycle--; }
+		else if(dis_voltage_bat < MAX_BATTERY_CHARGE)								{ duty_cycle++; }
 
 		/* Simpan daya/tegangan sebagai referensi langkah berikutnya. */
 		prevPowerInput = dis_power_pv;
