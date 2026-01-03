@@ -1,3 +1,11 @@
+/*
+ * File Role    : Implementasi algoritma MPPT hybrid (Perturb & Observe untuk start,
+ *                dilanjutkan Grasshopper Optimization Algorithm) beserta state machine
+ *                charging Bulk/CV/Float dan proteksi input.
+ * Dependencies : main.h untuk akses data ADC ter-skala, PWM_VALUE, flag charging,
+ *                serta HAL timing; math.h untuk operasi float (log, pow).
+ * Fungsi inti  : MPPT_Hybrid(), MPPT_Hybrid_Reset(), check_initial_state(), charging_flow().
+ */
 #include "main.h"
 #include <math.h>
 

@@ -1,3 +1,10 @@
+/*
+ * File Role    : Deklarasi utilitas LCD OLED (u8g2) untuk menampilkan data sistem/MPPT.
+ * Dependencies : stm32f1xx_hal.h untuk akses HAL I2C/delay, u8g2.h sebagai driver display,
+ *                stdio/string untuk format teks.
+ * Fungsi inti  : lcd_init(), DisplayRabbitAnimation(), lcd_main_display(), dan lcd_print_unit()
+ *                sebagai kontrak rendering UI; objek display diekspos untuk modul lain jika perlu.
+ */
 #ifndef LCD_DISPLAY_H
 #define	LCD_DISPLAY_H
 

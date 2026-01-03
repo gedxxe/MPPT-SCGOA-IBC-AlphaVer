@@ -1,3 +1,10 @@
+/*
+ * File Role    : Deklarasi kontrol PWM interleaved dua fase untuk konverter boost.
+ * Dependencies : stm32f1xx_hal.h untuk akses peripheral timer TIM1.
+ * Fungsi inti  : pwm_shift_out() mengatur duty fase, pwm_off() mematikan output,
+ *                pwm_test() melakukan sweep uji; variabel PWM_VALUE/duty_percent
+ *                diekspos sebagai status yang dibaca MPPT dan LCD.
+ */
 #ifndef PWM_H
 #define PWM_H
 

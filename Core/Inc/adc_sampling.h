@@ -1,3 +1,9 @@
+/*
+ * File Role    : Deklarasi fungsi dan variabel pembacaan ADC beserta scaling-nya.
+ * Dependencies : stm32f1xx_hal.h untuk akses HAL ADC/GPIO, math.h untuk log() temperatur.
+ * Fungsi inti  : adc_sampling() memproses batch ADC; variabel display (dis_*) diekspos
+ *                sebagai kontrak pembacaan sensor bagi modul MPPT, LCD, dan proteksi.
+ */
 #ifndef ADC_SAMPLING_H
 #define ADC_SAMPLING_H
 

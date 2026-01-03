@@ -26,6 +26,9 @@
 extern "C" {
 #endif
 
+/* File Role    : Titik masuk aplikasi STM32, mendeklarasikan GPIO/pin, dependensi modul.
+ * Dependencies : stm32f1xx_hal.h beserta modul aplikasi (adc_sampling, lcd_display, mppt, work_protect, pwm).
+ * Fungsi inti  : Error_Handler() serta HAL_TIM_MspPostInit() digunakan startup/driver PWM. */
 /* Includes ------------------------------------------------------------------*/
 #include "stm32f1xx_hal.h"
 

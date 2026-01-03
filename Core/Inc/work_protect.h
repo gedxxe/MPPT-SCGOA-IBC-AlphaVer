@@ -1,3 +1,9 @@
+/*
+ * File Role    : Deklarasi mekanisme proteksi (tegangan, arus, suhu) dan kontrol relay/kipas.
+ * Dependencies : stm32f1xx_hal.h untuk akses GPIO serta tipe dasar HAL.
+ * Fungsi inti  : work_protect_charging() dijalankan periodik untuk menjaga batas aman,
+ *                mpptError diekspos sebagai status fault global untuk UI/MPPT.
+ */
 #ifndef WORK_PROTECT_H
 #define WORK_PROTECT_H
 
