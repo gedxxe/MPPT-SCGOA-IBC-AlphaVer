@@ -674,8 +674,8 @@ void MPPT_PnO(void) {
 
 /* ---------- Current thresholds (max charge 2.2A elsewhere) ---------- */
 #define I_MIN_TO_ENTER_CV   3u     // 0.3A (pastikan memang ada charging)
-#define I_END_ABS           3u     // 0.3A (end current absorption)
-#define I_IDLE              1u     // 0.1A (anggap tidak charging)
+#define I_END_ABS           4u     // 0.4A (kompensasi resolusi 0.1A)
+#define I_IDLE              2u     // 0.2A (anggap tidak charging)
 
 /* ---------- Full-battery at startup fallback (BULK -> FLOAT) ---------- */
 #define V_BULK_TO_FLOAT_MIN 274u   // 27.4V (baterai sudah tinggi)
@@ -718,12 +718,18 @@ void check_initial_state(void)
     /* pembacaan dalam unit display (0.1V) */
     uint16_t Vbat = dis_voltage_bat;
 
-    if (Vbat >= VFLT_SET) {
+    /*
+     * Hysteresis start-up (anti flapping di sekitar ambang):
+     *  - ≥28.4V -> mulai di CV (absorption)
+     *  - 27.5V..28.3V -> FLOAT (baterai sudah tinggi)
+     *  - lainnya -> BULK
+     */
+    if (Vbat >= VABS_ENTER_MIN) {
+        /* mendekati/past absorption -> mulai di CV */
+        flag_charging_CV = 1;
+    } else if (Vbat >= 275u) {
         /* baterai sudah tinggi -> langsung FLOAT */
         flag_charging_FLOAT = 1;
-    } else if (Vbat >= VABS_ENTER_MIN) {
-        /* mendekati absorption -> mulai di CV */
-        flag_charging_CV = 1;
     } else {
         /* default: mulai BULK (MPPT) */
         flag_charging_Bulk = 1;
