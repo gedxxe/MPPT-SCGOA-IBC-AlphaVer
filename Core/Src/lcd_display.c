@@ -1,3 +1,9 @@
+/*
+ * File Role    : Rendering UI pada OLED SSD1309 menggunakan u8g2, termasuk splash
+ *                animation dan layar utama yang menampilkan telemetri MPPT.
+ * Dependencies : main.h (handle I2C, data sensor, status charging), u8g2 library.
+ * Fungsi inti  : lcd_init(), DisplayRabbitAnimation(), lcd_print_unit(), lcd_main_display().
+ */
 #include "main.h"
 
 char lcd_buff[16];

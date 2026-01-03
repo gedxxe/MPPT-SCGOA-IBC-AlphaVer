@@ -19,6 +19,11 @@
 /* Includes ------------------------------------------------------------------*/
 #include "main.h"
 #include <stdlib.h>
+/* File Role    : Titik masuk firmware STM32 untuk sistem MPPT interleaved boost.
+ * Dependencies : main.h menarik seluruh modul (ADC sampling, MPPT, LCD, proteksi, PWM).
+ * Fungsi inti  : Fungsi main(), Error_Handler(), serta callback HAL untuk timer.
+ * Catatan      : Struktur arsitektur (HAL init, scheduler berbasis flag, ISR timer/PWM)
+ *                dipertahankan; perubahan berfokus pada kebersihan format dan dokumentasi. */
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
@@ -41,24 +46,25 @@
 /* USER CODE END PM */
 
 /* Private variables ---------------------------------------------------------*/
-ADC_HandleTypeDef hadc1;
-DMA_HandleTypeDef hdma_adc1;
+ADC_HandleTypeDef hadc1;     /* Handle ADC utama untuk sampling sensor. */
+DMA_HandleTypeDef hdma_adc1; /* DMA yang menggerakkan ADC dalam mode circular. */
 
-I2C_HandleTypeDef hi2c1;
+I2C_HandleTypeDef hi2c1;     /* I2C untuk panel OLED. */
 
-TIM_HandleTypeDef htim1;
-TIM_HandleTypeDef htim4;
+TIM_HandleTypeDef htim1;     /* Timer PWM interleaved (dua channel). */
+TIM_HandleTypeDef htim4;     /* Timer basis waktu 1ms untuk scheduler sederhana. */
 
 /* USER CODE BEGIN PV */
-u8g2_t display;
+u8g2_t display;              /* Objek display u8g2 untuk rendering UI. */
 
-uint8_t count_5mS	= 0;
-uint8_t count_10mS	= 0;
-uint8_t count_100mS	= 0;
-uint8_t count_500mS	= 0;
-uint8_t count_1S	= 0;
+uint8_t count_5mS	= 0;    /* Counter 5ms untuk scheduler. */
+uint8_t count_10mS	= 0;    /* Counter 10ms untuk MPPT. */
+uint8_t count_100mS	= 0;    /* Counter 100ms untuk LCD. */
+uint8_t count_500mS	= 0;    /* Counter 500ms untuk proteksi. */
+uint8_t count_1S	= 0;    /* Counter 1s untuk heartbeat LED. */
 
-typedef struct { // Membuat flag untuk pewaktu
+/* Struktur flag yang diset di ISR timer lalu dikonsumsi di main loop. */
+typedef struct {
 	uint8_t flag_1mS;
 	uint8_t flag_5mS;
 	uint8_t flag_10mS;
@@ -67,7 +73,7 @@ typedef struct { // Membuat flag untuk pewaktu
 	uint8_t flag_1S;
 } time_base_t;
 
-time_base_t timeSch;
+time_base_t timeSch;         /* Instans scheduler global. */
 
 /* USER CODE END PV */
 
@@ -127,24 +133,24 @@ int main(void)
   /* Initialize interrupts */
   MX_NVIC_Init();
   /* USER CODE BEGIN 2 */
-  srand(HAL_GetTick()); // TAMBAHAN GARA2 PAKE GOA
-  lcd_init();
-  DisplayRabbitAnimation();
-  HAL_GPIO_WritePin(FAN_PIN_GPIO_Port, FAN_PIN_Pin, GPIO_PIN_SET);
+  srand(HAL_GetTick()); /* Seed RNG untuk metaheuristik GOA. */
+  lcd_init();           /* Inisialisasi OLED (u8g2) dan splash screen. */
+  DisplayRabbitAnimation(); /* Animasi pembuka untuk indikasi hidup. */
+  HAL_GPIO_WritePin(FAN_PIN_GPIO_Port, FAN_PIN_Pin, GPIO_PIN_SET); /* Hidupkan kipas sementara saat boot. */
 
-  HAL_TIM_Base_Start_IT(&htim4);
+  HAL_TIM_Base_Start_IT(&htim4); /* Timer 4 sebagai basis waktu scheduler 1ms. */
 
-  HAL_TIM_Base_Start_IT(&htim1);
-  HAL_TIM_PWM_Start(&htim1, TIM_CHANNEL_3);
-  HAL_TIM_PWM_Start(&htim1, TIM_CHANNEL_2);
+  HAL_TIM_Base_Start_IT(&htim1); /* Timer 1 sebagai generator PWM interleaved. */
+  HAL_TIM_PWM_Start(&htim1, TIM_CHANNEL_3); /* Channel PWM fase pertama. */
+  HAL_TIM_PWM_Start(&htim1, TIM_CHANNEL_2); /* Channel PWM fase kedua. */
 
-  HAL_ADCEx_Calibration_Start(&hadc1);
+  HAL_ADCEx_Calibration_Start(&hadc1); /* Kalibrasi ADC internal sebelum sampling. */
 
-  HAL_Delay(500);
+  HAL_Delay(500); /* Jeda agar hardware stabil setelah kalibrasi. */
 
-  HAL_ADC_Start_DMA(&hadc1, (uint32_t *)ADC_RAW, 5);
+  HAL_ADC_Start_DMA(&hadc1, (uint32_t *)ADC_RAW, 5); /* Mulai ADC berantai 5 channel via DMA. */
 
-  HAL_Delay(500);
+  HAL_Delay(500); /* Jeda sebelum kipas dimatikan agar startup tetap dingin. */
   HAL_GPIO_WritePin(FAN_PIN_GPIO_Port, FAN_PIN_Pin, GPIO_PIN_RESET);
   /* USER CODE END 2 */
 
@@ -153,26 +159,26 @@ int main(void)
   while (1)
   {
 	  if (timeSch.flag_1mS) {
-		  timeSch.flag_1mS = 0;
-		  adc_sampling();
+		  timeSch.flag_1mS = 0;   /* Clear setelah diambil agar tidak double-run. */
+		  adc_sampling();         /* Update data sensor; prerequisite untuk charging_flow. */
 	  }
 	  if (timeSch.flag_5mS) {
-		  timeSch.flag_5mS = 0;
+		  timeSch.flag_5mS = 0;   /* Slot cadangan jika butuh task 5ms di masa depan. */
 	  }
 	  if (timeSch.flag_10mS) {
-		  timeSch.flag_10mS = 0;
-		  charging_flow();
+		  timeSch.flag_10mS = 0;  /* 100 Hz: kecepatan utama state machine charging. */
+		  charging_flow();        /* Jalankan MPPT hybrid + penjagaan state charging. */
 	  }
 	  if (timeSch.flag_100mS) {
-		  timeSch.flag_100mS = 0;
-		  lcd_main_display();
+		  timeSch.flag_100mS = 0; /* 10 Hz: refresh UI agar tidak flicker. */
+		  lcd_main_display();     /* Render layar utama OLED. */
 	  }
 	  if (timeSch.flag_500mS) {
-		  timeSch.flag_500mS = 0;
-		  work_protect_charging();
+		  timeSch.flag_500mS = 0; /* 2 Hz: proteksi & relay gating memiliki jeda lebih panjang. */
+		  work_protect_charging();/* Evaluasi fault, kontrol kipas, dan relay. */
 	  }
 	  if (timeSch.flag_1S) {
-		  timeSch.flag_1S = 0;
+		  timeSch.flag_1S = 0;    /* 1 Hz: heartbeat visual. */
 		  HAL_GPIO_TogglePin(LED_RUN_PIN_GPIO_Port, LED_RUN_PIN_Pin);
 
 	  }
@@ -534,14 +540,16 @@ static void MX_GPIO_Init(void)
 /* USER CODE BEGIN 4 */
 void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim) {
 	if(htim == &htim1) {
+		/* Timer PWM: memanggil shift interleaving setiap perioda PWM. */
 		if(flag_enter_charge){
-			shift_pwm_channel++;
-			if (shift_pwm_channel >= 3) {
+			shift_pwm_channel++;          /* Geser channel aktif (1 -> 2 -> 1 ...) */
+			if (shift_pwm_channel >= 3) { /* Wrap ke 1 ketika melewati kanal kedua. */
 				shift_pwm_channel = 1;
 			}
-			pwm_shift_out(shift_pwm_channel, PWM_VALUE);
+			pwm_shift_out(shift_pwm_channel, PWM_VALUE); /* Tulis duty terkini ke channel aktif. */
 		}
 		else {
+			/* Charging belum diizinkan: pastikan PWM mati dan state nol. */
 			shift_pwm_channel = 0;
 			duty_cycle = 0;
 			PWM_VALUE = 0;
@@ -550,30 +558,30 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim) {
 	}
 
 	if (htim == &htim4){ //update Timer 1mS
-		timeSch.flag_1mS = 1;
-		count_5mS++;
-		count_10mS++;
+		timeSch.flag_1mS = 1; /* Setiap 1ms: flag dasar untuk sampling. */
+		count_5mS++;          /* Hitung maju untuk turunan periode 5ms. */
+		count_10mS++;         /* Hitung maju untuk turunan periode 10ms. */
 		if (count_5mS >= 5) {
-			timeSch.flag_5mS = 1;
+			timeSch.flag_5mS = 1; /* Jadwalkan tugas 5ms. */
 			count_5mS = 0;
 		}
 		if (count_10mS >= 10) {
-			timeSch.flag_10mS = 1;
-			count_100mS++;
+			timeSch.flag_10mS = 1; /* Jadwalkan tugas 10ms (MPPT). */
+			count_100mS++;         /* Siapkan turunan 100ms. */
 			count_10mS = 0;
 		}
 		if (count_100mS >= 10) {
-			timeSch.flag_100mS = 1;
-			count_500mS++;
+			timeSch.flag_100mS = 1; /* Jadwalkan tugas 100ms (LCD). */
+			count_500mS++;          /* Siapkan turunan 500ms. */
 			count_100mS = 0;
 		}
 		if (count_500mS >= 5) {
-			timeSch.flag_500mS = 1;
-			count_1S++;
+			timeSch.flag_500mS = 1; /* Jadwalkan tugas 500ms (proteksi/relay). */
+			count_1S++;             /* Siapkan heartbeat 1 detik. */
 			count_500mS = 0;
 		}
 		if (count_1S >= 2) {
-			timeSch.flag_1S = 1;
+			timeSch.flag_1S = 1; /* Jadwalkan heartbeat LED. */
 			count_1S = 0;
 		}
 

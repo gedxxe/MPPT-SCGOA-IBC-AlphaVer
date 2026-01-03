@@ -1,12 +1,20 @@
+/*
+ * File Role    : Implementasi pembacaan ADC multi-kanal via DMA, penghalusan sampel,
+ *                dan konversi ke unit display untuk dikonsumsi MPPT/UI/proteksi.
+ * Dependencies : main.h (membawa konstanta koefisien, akses HAL, dan flag global).
+ * Fungsi inti  : adc_sampling() dipanggil periodik; callback HAL_ADC_ConvCpltCallback
+ *                mengisi akumulator. Ekspor variabel dis_* dan ADC_RAW dilakukan via header.
+ */
 #include "main.h"
 
+/* Indeks channel ADC; menjaga konsistensi urutan sesuai konfigurasi DMA. */
 enum {
-    ADC_IDX_PV_VOLT = 0,
-    ADC_IDX_BAT_VOLT,
-    ADC_IDX_BAT_CURR,
-    ADC_IDX_PV_CURR,
-    ADC_IDX_TEMP,
-    ADC_IDX_COUNT = ADC_CHANNEL_COUNT
+    ADC_IDX_PV_VOLT = 0,   /* Tegangan panel PV terukur. */
+    ADC_IDX_BAT_VOLT,      /* Tegangan baterai. */
+    ADC_IDX_BAT_CURR,      /* Arus baterai. */
+    ADC_IDX_PV_CURR,       /* Arus PV. */
+    ADC_IDX_TEMP,          /* Tegangan sensor NTC. */
+    ADC_IDX_COUNT = ADC_CHANNEL_COUNT /* Penjaga ukuran buffer ADC_RAW. */
 };
 
 /* Urutan kanal mengikuti konfigurasi DMA (pvV, batV, batI, pvI, suhu). */
