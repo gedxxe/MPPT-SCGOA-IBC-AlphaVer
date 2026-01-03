@@ -18,6 +18,12 @@ extern uint8_t flag_enter_charge;
 extern uint8_t flag_charging_Bulk;
 extern uint8_t flag_charging_CV;
 extern uint8_t flag_charging_FLOAT;
+extern uint8_t dbg_limit_psu;
+
+/* Compile-time switch:
+ * - ENABLE_PSU_ESCAPE=1 (default): aktifkan escape hatch PSU current-limited.
+ * - ENABLE_PSU_ESCAPE=0: matikan jika sumber adalah panel PV murni.
+ *   Dapat di-set via -D atau dengan mendefinisikan sebelum include mppt.c. */
 
 /* Menggerakkan MPPT hybrid (PnO + GOA) tiap 10 ms. */
 void MPPT_Hybrid(void);
