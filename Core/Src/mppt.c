@@ -1,6 +1,37 @@
 #include "main.h"
 #include <math.h>
 
+/* ============================================================
+ *  STATE MACHINE & VERIF SNAPSHOT (2024-11)
+ *  - States:
+ *      BULK  : MPPT_Hybrid() mengejar daya, guard konduksi & proteksi.
+ *      CV    : Penahan Vabs dengan hysteresis ±VABS_HYST, anti-flap via timer.
+ *      FLOAT : Penjagaan Vflt dengan hysteresis ±VFLT_HYST + rebulk timer.
+ *      IDLE  : Semua flag 0 ketika PV absen / relay off.
+ *  - Guards & hysteresis:
+ *      • PV-loss debounce (AND, 500 ms) mematikan PWM, reset MPPT.
+ *      • BULK→CV pakai tegangan + arus + timer 10 s; BULK→FLOAT fallback pakai
+ *        tegangan tinggi + arus rendah + timer 3 s.
+ *      • CV→FLOAT butuh dwell 30 s + arus rendah + timer 1 s.
+ *      • FLOAT→BULK via V_REBULK 5 s dengan counter naik/turun.
+ *  - Safety interlock:
+ *      • Over-current/over-voltage: duty step-down + reset GOA gate.
+ *      • PV dicabut: PWM=0, flags=0, MPPT reset, trend log dihapus.
+ *  - Escape hatch PSU current-limited:
+ *      • Deteksi arus mentok + Vpv sag + daya stagnan ≥0.8 s → duty dibekukan
+ *        2 s + flag dbg_limit_psu untuk log ringan (ENABLE_PSU_ESCAPE dapat
+ *        di-compile-off via -DENABLE_PSU_ESCAPE=0 atau override di mppt.h).
+ *  - Skenario verif (ringkas):
+ *      1) Cold start 27.6V → langsung FLOAT, PWM=0 (arus≈0), hysteresis float.
+ *      2) Cold start 26V → BULK→CV→FLOAT berurutan; guard keluar BULK via timer
+ *         dan fallback high-V; CV menjaga tegangan dengan band ±0.4V.
+ *      3) PSU current limited → duty tidak naik tak terhingga; escape hatch
+ *         aktif dan tercatat di dbg_limit_psu.
+ *      4) PV dicabut saat BULK → PWM=0, flags reset, MPPT_Hybrid_Reset().
+ *      5) PV dicabut saat FLOAT → saat PV kembali, check_initial_state() ulang
+ *         (tetap FLOAT bila Vbat tinggi) dengan hysteresis rebulk 5 s.
+ * ============================================================ */
+
 /* Flag state FLOAT; dipisah agar mudah dicek oleh UI/pengendali. */
 uint8_t flag_charging_FLOAT = 0;
 
@@ -12,6 +43,9 @@ uint8_t flag_enter_charge	= 0;
 /* Flag tahapan charging aktif. */
 uint8_t flag_charging_Bulk 	= 0;
 uint8_t flag_charging_CV	= 0;
+
+/* Telemetry ringan untuk mendeteksi “bench current limited” escape hatch. */
+uint8_t dbg_limit_psu       = 0;
 
 /* Memori PnO untuk membandingkan daya/tegangan langkah sebelumnya. */
 uint16_t prevPowerInput		= 0;
@@ -123,6 +157,25 @@ static float randn_approx(void)
 #define COND_IBAT_TH        1u      // contoh: 0.1A kalau unit 0.1A
 #define COND_STABLE_N       10u     // 10 * 10ms = 100ms stabil
 
+/* ---------- Bench PSU escape hatch (compile-time gate) ----------
+ * Deteksi ketika arus sudah mentok, Vpv turun, tapi daya tidak naik.
+ * Dipakai untuk menghentikan eskalasi duty yang sia-sia di PSU current-limited.
+ *
+ * NON-PSU (panel PV) MODE:
+ *  - Set ENABLE_PSU_ESCAPE ke 0 (misal via -DENABLE_PSU_ESCAPE=0 atau
+ *    #define di mppt.h) untuk mematikan heuristik ini jika sumber bukan PSU.
+ */
+#ifndef ENABLE_PSU_ESCAPE
+#define ENABLE_PSU_ESCAPE 1
+#endif
+
+#if ENABLE_PSU_ESCAPE
+#define PSU_SAG_DVPV_TH     8u      // 0.8V drop dari sampel sebelumnya
+#define PSU_STALL_COUNT     80u     // 0.8s berturut-turut
+#define PSU_RELAX_TICKS     200u    // 2.0s menahan duty agar tidak naik
+#define PSU_RECOVER_DVPV    5u      // butuh recovery tegangan sebelum relaks dihapus
+#endif
+
 /* ============================================================
  *  STATE (persistent)
  * ============================================================ */
@@ -136,6 +189,17 @@ static uint16_t pv_loss_cnt = 0;
 
 /* conduction stable debounce */
 static uint16_t cond_cnt = 0;
+
+/* escape hatch PSU current limited */
+#if ENABLE_PSU_ESCAPE
+static uint16_t psu_limit_cnt     = 0;
+static uint16_t psu_limit_relax   = 0;
+static uint16_t psu_limit_ceiling = 0;
+
+/* trend memori untuk escape hatch (PV sag & power stall) */
+static uint16_t Vpv_last = 0;
+static uint32_t Ppv_last = 0;
+#endif
 
 /* GOA arrays */
 static float goats_D[N_GOAT];
@@ -165,6 +229,15 @@ static uint32_t eval_sumP = 0;
 /* duty memory */
 static uint16_t Dold_pwm = 0;
 
+/* Update histori PV untuk escape hatch PSU (no-op if disabled). */
+#if ENABLE_PSU_ESCAPE
+#define UPDATE_TRENDS(Vpv_now, Ppv_now) \
+    do { Vpv_last = (Vpv_now); Ppv_last = (Ppv_now); } while (0)
+#else
+#define UPDATE_TRENDS(Vpv_now, Ppv_now) \
+    do { (void)(Vpv_now); (void)(Ppv_now); } while (0)
+#endif
+
 /* ============================================================
  *  RESET FUNCTION (panggil saat PV putus / charging stop)
  * ============================================================ */
@@ -177,6 +250,16 @@ void MPPT_Hybrid_Reset(void)
     /* Hapus debounce PV loss & konduksi. */
     pv_loss_cnt    = 0;
     cond_cnt       = 0;
+
+#if ENABLE_PSU_ESCAPE
+    /* bersihkan escape hatch PSU */
+    psu_limit_cnt     = 0;
+    psu_limit_relax   = 0;
+    psu_limit_ceiling = 0;
+    dbg_limit_psu     = 0;
+    Vpv_last          = 0;
+    Ppv_last          = 0;
+#endif
 
     /* Reset mesin GOA ke siklus awal. */
     state_goa      = 1;
@@ -259,6 +342,7 @@ void MPPT_Hybrid(void)
 
         MPPT_Hybrid_Reset();  /* Bersihkan state algoritma. */
         pv_loss_cnt = 0;      /* Reset debounce agar siap deteksi ulang. */
+        UPDATE_TRENDS(Vpv, Ppv32);
         return;
     }
 
@@ -281,6 +365,7 @@ void MPPT_Hybrid(void)
         /* Balik ke PnO agar stabil setelah kondisi aman. */
         pno_active = 1;
         cond_cnt = 0;
+        UPDATE_TRENDS(Vpv, Ppv32);
         return;
     }
     if (dis_voltage_bat > MAX_BATTERY_CHARGE) {
@@ -292,6 +377,7 @@ void MPPT_Hybrid(void)
         /* Reset gating konduksi agar GOA tidak aktif saat proteksi. */
         pno_active = 1;
         cond_cnt = 0;
+        UPDATE_TRENDS(Vpv, Ppv32);
         return;
     }
 
@@ -353,8 +439,57 @@ void MPPT_Hybrid(void)
         cond_cnt = 0;
     }
 
+#if ENABLE_PSU_ESCAPE
     /* ========================================================
-     * 7) PHASE 1: PnO proven kamu (startup / anti-stuck)
+     * 7) Escape hatch: bench PSU current-limited (BULK only)
+     *    - Deteksi: arus sudah dekat limit, Vpv turun, daya tidak naik.
+     *    - Aksi: tahan duty (atau step down sedikit) + log flag ringan.
+     * ======================================================== */
+    uint8_t near_current_ceiling = (Ipv >= (uint16_t)(MAX_CURRENT_CHARGE - 1u)) || (Ibat >= (uint16_t)(MAX_CURRENT_CHARGE - 1u));
+    uint8_t pv_sagging           = (Vpv_last > 0) && (Vpv + PSU_SAG_DVPV_TH < Vpv_last);
+    uint8_t power_not_better     = (Ppv_last > 0) && (Ppv32 + (uint32_t)Ipv <= Ppv_last); /* tambah Ipv sebagai margin noise */
+
+    if (near_current_ceiling && pv_sagging && power_not_better && PWM_VALUE > 0) {
+        if (psu_limit_cnt < PSU_STALL_COUNT) psu_limit_cnt++;
+    } else {
+        if (psu_limit_cnt > 0) psu_limit_cnt--;
+    }
+
+    /* jika limit terdeteksi lama, bekukan duty agar tidak terus naik */
+    if (psu_limit_cnt >= PSU_STALL_COUNT) {
+        psu_limit_ceiling = PWM_VALUE;
+        psu_limit_relax   = PSU_RELAX_TICKS;
+        dbg_limit_psu     = 1;                 /* logging ringan untuk UI / debug */
+
+        if (PWM_VALUE > 0) PWM_VALUE--;        /* redam 1 step supaya sag berhenti */
+        duty_cycle   = PWM_VALUE;
+        duty_percent = (PWM_VALUE * 100) / MAX_PERIOD;
+    }
+
+    /* selama relaksasi, jangan biarkan duty melampaui ceiling */
+    if (psu_limit_relax > 0) {
+        psu_limit_relax--;
+
+        if (psu_limit_ceiling > 0 && PWM_VALUE > psu_limit_ceiling) {
+            PWM_VALUE = psu_limit_ceiling;
+            duty_cycle = PWM_VALUE;
+        }
+
+        /* lepas relaksasi hanya jika Vpv sudah recovery dan arus turun */
+        if (!near_current_ceiling && (Vpv + PSU_RECOVER_DVPV) > Vpv_last) {
+            psu_limit_relax   = 0;
+            psu_limit_ceiling = 0;
+            dbg_limit_psu     = 0;
+        }
+    } else if (psu_limit_cnt == 0) {
+        /* limit sudah pulih total */
+        psu_limit_ceiling = 0;
+        dbg_limit_psu     = 0;
+    }
+#endif
+
+    /* ========================================================
+     * 8) PHASE 1: PnO proven kamu (startup / anti-stuck)
      *    - PnO akan “mendorong” duty sampai ada arus masuk stabil.
      * ======================================================== */
     if (pno_active)
@@ -402,11 +537,12 @@ void MPPT_Hybrid(void)
             /* jangan return, biar loop berikutnya GOA mulai rapi */
         }
 
+        UPDATE_TRENDS(Vpv, Ppv32);
         return; // PHASE 1 selesai di sini
     }
 
     /* ========================================================
-     * 8) PHASE 2: GOA refine (MATLAB-like) dengan hold+avg fitness
+     * 9) PHASE 2: GOA refine (MATLAB-like) dengan hold+avg fitness
      * ======================================================== */
     uint16_t pwm_min = (uint16_t)(DUTY_LB_F * (float)MAX_PERIOD + 0.5f);
     uint16_t pwm_max = (uint16_t)(DUTY_UB_F * (float)MAX_PERIOD + 0.5f);
@@ -438,6 +574,7 @@ void MPPT_Hybrid(void)
                 }
             }
 
+            UPDATE_TRENDS(Vpv, Ppv32);
             return; // selama holding, jangan ubah PWM lagi
         }
 
@@ -452,6 +589,11 @@ void MPPT_Hybrid(void)
 
             uint16_t pwm_cmd = (uint16_t)(Dg * (float)MAX_PERIOD + 0.5f);
             pwm_cmd = clamp_u16(pwm_cmd, pwm_min, pwm_max);
+#if ENABLE_PSU_ESCAPE
+            if (psu_limit_relax > 0 && psu_limit_ceiling > 0 && pwm_cmd > psu_limit_ceiling) {
+                pwm_cmd = psu_limit_ceiling;   /* honor escape hatch ceiling */
+            }
+#endif
 
             /* slew limit biar nggak brutal */
             int diff = (int)pwm_cmd - (int)Dold_pwm;
@@ -472,6 +614,7 @@ void MPPT_Hybrid(void)
             eval_avg_cnt = 0;
             eval_sumP    = 0;
 
+            UPDATE_TRENDS(Vpv, Ppv32);
             return;
         }
     }
@@ -602,6 +745,11 @@ void MPPT_Hybrid(void)
 
         uint16_t pwm_cmd = (uint16_t)(Dcmd * (float)MAX_PERIOD + 0.5f);
         pwm_cmd = clamp_u16(pwm_cmd, pwm_min, pwm_max);
+#if ENABLE_PSU_ESCAPE
+        if (psu_limit_relax > 0 && psu_limit_ceiling > 0 && pwm_cmd > psu_limit_ceiling) {
+            pwm_cmd = psu_limit_ceiling;
+        }
+#endif
 
         int diff = (int)pwm_cmd - (int)Dold_pwm;
         uint16_t maxStep = (conv_counter >= CONV_COUNT_LIMIT) ? 1u : MAX_DELTA_PWM;
@@ -612,10 +760,12 @@ void MPPT_Hybrid(void)
         duty_cycle  = pwm_cmd; // sync
         duty_percent = (PWM_VALUE * 100) / MAX_PERIOD;
         Dold_pwm    = pwm_cmd;
+        UPDATE_TRENDS(Vpv, Ppv32);
         return;
     }
 
     /* fallback kalau state corrupt -> balik PnO */
+    UPDATE_TRENDS(Vpv, Ppv32);
     pno_active = 1;
 }
 // =============================================================
@@ -646,6 +796,12 @@ void MPPT_PnO(void) {
 	else if(duty_cycle <= 0) {
 		duty_cycle = 0;
 	}
+    /* jika escape hatch PSU aktif, jangan melewati ceiling */
+#if ENABLE_PSU_ESCAPE
+    if (psu_limit_relax > 0 && psu_limit_ceiling > 0 && duty_cycle > psu_limit_ceiling) {
+        duty_cycle = psu_limit_ceiling;
+    }
+#endif
 	/* Propagasi hasil perturbasi ke register PWM & persen untuk UI. */
 	PWM_VALUE = duty_cycle;
 	duty_percent = (PWM_VALUE * 100) / MAX_PERIOD;
@@ -713,6 +869,9 @@ static uint16_t t_bulk_highV  = 0;
 static uint32_t t_flow_ticks      = 0;
 static uint32_t t_abs_enter_ticks = 0;
 
+/* latch PV hilang untuk re-evaluasi state saat PV kembali */
+static uint8_t pv_absent_latched = 0;
+
 /* ============================================================
  *  INITIAL STATE SELECTION (dipanggil saat relay bat di-on-kan)
  *  Menentukan titik awal charging berdasarkan tegangan baterai.
@@ -743,9 +902,16 @@ void check_initial_state(void)
         /* mendekati/past absorption -> mulai di CV */
         flag_charging_CV = 1;
         t_abs_enter_ticks = t_flow_ticks;  /* pastikan dwell dihitung dari start CV */
+        /* mulai dengan duty rendah agar tidak langsung overshoot */
+        PWM_VALUE    = (uint16_t)(0.05f * (float)MAX_PERIOD);
+        duty_cycle   = PWM_VALUE;
+        duty_percent = (PWM_VALUE * 100) / MAX_PERIOD;
     } else if (Vbat >= 275u) {
         /* baterai sudah tinggi -> langsung FLOAT */
         flag_charging_FLOAT = 1;
+        PWM_VALUE    = 0;    /* biarkan mengapung, duty nanti naik perlahan bila perlu */
+        duty_cycle   = 0;
+        duty_percent = 0;
     } else {
         /* default: mulai BULK (MPPT) */
         flag_charging_Bulk = 1;
@@ -760,7 +926,7 @@ void check_initial_state(void)
 
 void charging_flow(void)
 {
-    if (!(flag_adc_done && flag_enter_charge)) {
+    if (!flag_adc_done) {
         /* pastikan counter transisi tidak nyangkut saat charging tidak aktif */
         t_enter_cv   = 0;
         t_to_float   = 0;
@@ -800,7 +966,29 @@ void charging_flow(void)
         t_bulk_highV = 0;
         t_flow_ticks = 0;
         t_abs_enter_ticks = 0;
+        pv_absent_latched = 1;
 
+        flag_adc_done = 0;
+        return;
+    }
+    else {
+        /* PV sudah kembali; jika sebelumnya absent, evaluasi ulang state awal. */
+        if (pv_absent_latched && !flag_enter_charge) {
+            pv_absent_latched = 0;
+            check_initial_state();
+        } else {
+            pv_absent_latched = 0;
+        }
+    }
+
+    /* jika charging belum diizinkan (mis. relay belum siap), jangan lanjut loop */
+    if (!flag_enter_charge) {
+        t_enter_cv   = 0;
+        t_to_float   = 0;
+        t_bulk_float = 0;
+        t_rebulk     = 0;
+        t_bulk_highV = 0;
+        t_abs_enter_ticks = 0;
         flag_adc_done = 0;
         return;
     }
