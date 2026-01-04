@@ -187,6 +187,7 @@ static float randn_approx(void)
 /* Headroom untuk menyimpan snapshot sebelum tegangan benar-benar ambruk. */
 #define PV_RESUME_HEADROOM    30u    // 3.0V di atas ambang PV_LOSS_V_TH
 #define PV_RESUME_DEADBAND    15u    // 1.5V deadband validasi resume berbasis rata-rata
+#define PV_RESUME_MIN_V       80u    // 8.0V: minimum valid untuk boleh resume duty
 #define PV_WINDOW_COUNT       10u    // 10 sampel @10ms ~100ms smoothing Vpv
 #define PV_ARM_BAND           8u     // 0.8V: syarat minimal untuk arm snapshot (lebih ketat)
 #define PV_DROP_DV_TH         12u    // 1.2V per 10ms dianggap drop tajam PSU
@@ -926,6 +927,10 @@ static uint8_t  resume_armed      = 0;
 static uint16_t resume_pwm_bookmark = 0;
 static uint16_t resume_vpv_bookmark = 0;
 static uint16_t resume_bookmark_age = 0;
+static uint16_t resume_vpv_snapshot = 0; /* Vpv stabil saat bookmark diambil (anti anjlok akibat averaging) */
+static uint16_t resume_pwm_snapshot = 0; /* duty stabil saat bookmark diambil */
+static uint16_t stable_vpv_last     = 0; /* Vpv terakhir yang valid (untuk fallback resume <5s) */
+static uint16_t stable_pwm_last     = 0; /* PWM terakhir yang valid (untuk fallback resume <5s) */
 
 static inline void reset_flow_counters(void)
 {
@@ -947,6 +952,10 @@ static inline void clear_resume_snapshot(void)
     resume_pwm_bookmark = 0;
     resume_vpv_bookmark = 0;
     resume_bookmark_age = 0;
+    resume_vpv_snapshot = 0;
+    resume_pwm_snapshot = 0;
+    stable_vpv_last     = 0;
+    stable_pwm_last     = 0;
     pv_drop_cnt = 0;
     pv_window_frozen = 0;
 }
@@ -993,13 +1002,17 @@ static inline void pv_window_reseed(uint16_t Vpv_seed)
 static inline void update_resume_bookmark(uint16_t Vpv, uint16_t Ipv, uint16_t pwm_now)
 {
     /* Simpan snapshot hanya saat PV benar-benar masih ada (tegangan & arus cukup). */
-    uint8_t pv_level_ok = (Vpv > (PV_LOSS_V_TH + PV_ARM_BAND)) && (Vpv > (pv_window_avg + PV_ARM_BAND)) ? 1u : 0u;
+    uint8_t pv_level_ok = (Vpv > (PV_LOSS_V_TH + PV_ARM_BAND)) && (Vpv >= PV_RESUME_MIN_V) ? 1u : 0u;
     uint8_t pv_sane = pv_level_ok && (Ipv > PV_LOSS_I_TH);
 
     if (pv_sane) {
         resume_pwm_bookmark = pwm_now;
         resume_vpv_bookmark = Vpv;
         resume_bookmark_age = RESUME_MAX_LOSS_TICKS; /* tetap fresh selama ~5s tanpa PV. */
+        resume_vpv_snapshot = Vpv;
+        resume_pwm_snapshot = pwm_now;
+        stable_vpv_last     = Vpv;
+        stable_pwm_last     = pwm_now;
     } else if (resume_bookmark_age > 0) {
         resume_bookmark_age--; /* Hindari memakai snapshot terlalu lama setelah PV hilang. */
     }
@@ -1007,11 +1020,13 @@ static inline void update_resume_bookmark(uint16_t Vpv, uint16_t Ipv, uint16_t p
 
 static inline void arm_resume_from_bookmark(uint16_t Vpv_now, uint16_t pwm_now)
 {
-    uint16_t snap_pwm = resume_pwm_bookmark ? resume_pwm_bookmark : pwm_now;
-    uint16_t snap_vpv = resume_vpv_bookmark ? resume_vpv_bookmark : ((pv_window_avg > PV_LOSS_V_TH) ? pv_window_avg : Vpv_now);
+    uint16_t snap_pwm = resume_pwm_bookmark ? resume_pwm_bookmark : (stable_pwm_last ? stable_pwm_last : pwm_now);
+    uint16_t snap_vpv = resume_vpv_bookmark ? resume_vpv_bookmark : (stable_vpv_last ? stable_vpv_last : ((pv_window_avg > PV_LOSS_V_TH) ? pv_window_avg : Vpv_now));
 
     resume_pwm_last   = snap_pwm;
     resume_vpv_last   = snap_vpv;
+    resume_vpv_snapshot = snap_vpv;
+    resume_pwm_snapshot = snap_pwm;
     resume_loss_ticks = 0;
     resume_armed      = 1;
     resume_bookmark_age = 0;
@@ -1079,16 +1094,21 @@ void charging_flow(void)
     uint16_t Ipv_now = dis_current_pv; // 0.1A
     t_flow_ticks++;                    // tiap 10 ms
     /* Hitung rata-rata Vpv (100ms window) untuk keputusan loss/resume yang lebih robust.
-     * Saat PV dianggap hilang (window frozen), pakai rata-rata terakhir agar tidak terpolusi nol. */
+     * Saat PV dianggap hilang (window frozen), gunakan sampel instan agar tidak terjebak di nilai nol. */
     uint16_t Vpv_avg = pv_window_frozen ? (pv_window_avg ? pv_window_avg : Vpv_now) : pv_window_push(Vpv_now);
+    if (pv_window_frozen && Vpv_now > Vpv_avg) {
+        /* Paksa rata-rata mengikuti pemulihan PV supaya keluar dari status “absent” lebih cepat. */
+        pv_window_avg = Vpv_now;
+    }
     uint8_t pv_drop_fast = (pv_drop_cnt >= PV_DROP_COUNT_MAX);
+    uint16_t Vpv_for_absent = pv_window_frozen ? Vpv_now : Vpv_avg;
 
     /* Refresh bookmark untuk kemampuan resume (gunakan PV & duty terkini). */
     uint16_t Vpv_for_bookmark = (Vpv_avg > Vpv_now) ? Vpv_avg : Vpv_now;
     update_resume_bookmark(Vpv_for_bookmark, Ipv_now, PWM_VALUE);
 
     /* standby jika input PV/PSU benar-benar tidak ada */
-    uint8_t pv_absent_voltage = (Vpv_now <= PV_LOSS_V_TH) || (Vpv_avg <= (PV_LOSS_V_TH + PV_RESUME_DEADBAND)) || pv_drop_fast;
+    uint8_t pv_absent_voltage = (Vpv_now <= PV_LOSS_V_TH) || (Vpv_for_absent <= (PV_LOSS_V_TH + PV_RESUME_DEADBAND)) || pv_drop_fast;
     uint8_t pv_absent = pv_absent_voltage && (Ipv_now <= PV_LOSS_I_TH);
     if (pv_absent) {
         if (pv_drop_fast) {
@@ -1117,8 +1137,7 @@ void charging_flow(void)
 
         flag_adc_done = 0;
         return;
-    }
-    else {
+    } else {
         /* PV sudah kembali; jika sebelumnya absent, evaluasi ulang/resume. */
         if (pv_absent_latched && !flag_enter_charge) {
             /* Restart jendela rata-rata dengan sampel terbaru agar tidak tercemar nol. */
@@ -1128,14 +1147,13 @@ void charging_flow(void)
 
             if (resume_armed && resume_loss_ticks <= RESUME_MAX_LOSS_TICKS) {
                 uint16_t Vpv_now_return = dis_voltage_pv;
-                uint16_t Vpv_avg_return = pv_window_avg;
-                uint16_t dV_inst = abs_diff_u16(resume_vpv_last, Vpv_now_return);
-                uint16_t dV_avg  = abs_diff_u16(resume_vpv_last, Vpv_avg_return);
-                uint8_t within_band = (dV_inst <= RESUME_DVPV_WINDOW) || (dV_avg <= PV_RESUME_DEADBAND);
-                if (within_band && Vpv_avg_return > PV_LOSS_V_TH) {
+                uint16_t dV_inst = abs_diff_u16(resume_vpv_snapshot ? resume_vpv_snapshot : resume_vpv_last, Vpv_now_return);
+                uint8_t within_band = (dV_inst <= RESUME_DVPV_WINDOW);
+                uint8_t above_min   = (Vpv_now_return >= PV_RESUME_MIN_V);
+                if (within_band && above_min) {
                     uint16_t pwm_min = (uint16_t)(DUTY_LB_F * (float)MAX_PERIOD + 0.5f);
                     uint16_t pwm_max = (uint16_t)(DUTY_UB_F * (float)MAX_PERIOD + 0.5f);
-                    uint16_t pwm_resume = clamp_u16(resume_pwm_last, pwm_min, pwm_max);
+                    uint16_t pwm_resume = clamp_u16(resume_pwm_snapshot ? resume_pwm_snapshot : resume_pwm_last, pwm_min, pwm_max);
 
                     sync_pwm_outputs(pwm_resume);
                     flag_charging_Bulk  = 1;
