@@ -1,6 +1,6 @@
 /*
  * File Role    : Implementasi algoritma MPPT hybrid (Perturb & Observe untuk start,
- *                dilanjutkan Grasshopper Optimization Algorithm) beserta state machine
+ *                dilanjutkan Goat Optimizer Algorithm/GOA) beserta state machine
  *                charging Bulk/CV/Float dan proteksi input.
  * Dependencies : main.h untuk akses data ADC ter-skala, PWM_VALUE, flag charging,
  *                serta HAL timing; math.h untuk operasi float (log, pow).
@@ -13,7 +13,7 @@
 #include "pwm.h"            // extern uint16_t PWM_VALUE; extern int duty_percent; #define MAX_PERIOD ...
 
 /* ============================================================
- *  STATE MACHINE & VERIF SNAPSHOT (2024-11)
+ *  STATE MACHINE & VERIF SNAPSHOT (2026-01)
  *  - States:
  *      BULK  : MPPT_Hybrid() mengejar daya, guard konduksi & proteksi.
  *      CV    : Penahan Vabs dengan hysteresis ±VABS_HYST, anti-flap via timer.
