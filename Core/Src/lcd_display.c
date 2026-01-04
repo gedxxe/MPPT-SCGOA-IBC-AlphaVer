@@ -64,14 +64,15 @@ uint8_t u8x8_i2c(u8x8_t *u8x8, uint8_t msg, uint8_t arg_int, void *arg_ptr)
 			data = (uint8_t *)arg_ptr;
 			while( arg_int > 0 )
 			{
-				buffer[buf_idx++] = *data;
+				if (buf_idx < sizeof(buffer)) {
+					buffer[buf_idx++] = *data;
+				}
 				data++;
 				arg_int--;
 			}
 			break;
 		case U8X8_MSG_BYTE_START_TRANSFER:
 			buf_idx = 0;
-			HAL_I2C_Master_Transmit(&hi2c1, 0x78, buffer, buf_idx, 1000);
 			break;
 		case U8X8_MSG_BYTE_END_TRANSFER:
 			HAL_I2C_Master_Transmit(&hi2c1, 0x78, buffer, buf_idx, 1000);
@@ -163,6 +164,7 @@ void lcd_print_unit(uint8_t col, uint8_t row, uint16_t data, UnitLcd_e unit) {
 			break;
 		case UNIT_POWER: // Print unit Daya
 			sprintf(lcd_buff, "%u.%01uW ", data / 100, data % 100);
+			break;
 		default:
 			break;
 	}
