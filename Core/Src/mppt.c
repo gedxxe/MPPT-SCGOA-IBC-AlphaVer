@@ -42,6 +42,16 @@
  *      5) PV dicabut saat FLOAT → saat PV kembali, check_initial_state() ulang
  *         (tetap FLOAT bila Vbat tinggi) dengan hysteresis rebulk 5 s.
  * ============================================================ */
+/* ============================================================
+ *  CHANGELOG - 13 May 2026 (Pure SC-GOA Refactor)
+ *  1) Menghapus jalur fallback/startup Perturb & Observe pada
+ *     MPPT_Hybrid(), sehingga mode BULK memakai SC-GOA murni.
+ *  2) Menghapus fungsi MPPT_PnO() beserta state residu terkait.
+ *  3) Merapikan komentar agar fokus ke alur SC-GOA aktual.
+ *  4) Mempertahankan guard keselamatan existing (PV-loss debounce,
+ *     over-current/over-voltage step-down, PSU current-limit escape,
+ *     slew limiter, dan hold+average fitness sampling).
+ * ============================================================ */
 
 /* Flag state FLOAT; dipisah agar mudah dicek oleh UI/pengendali. */
 uint8_t flag_charging_FLOAT = 0;
@@ -58,29 +68,20 @@ uint8_t flag_charging_CV	= 0;
 /* Telemetry ringan untuk mendeteksi “bench current limited” escape hatch. */
 uint8_t dbg_limit_psu       = 0;
 
-/* Memori PnO untuk membandingkan daya/tegangan langkah sebelumnya. */
-uint16_t prevPowerInput		= 0;
-uint16_t prevVoltagePv		= 0;
-
-
 //=======================================================
 /* ============================================================
- *  MPPT Hybrid (PnO Startup -> GOA refine) - STM32
+ *  MPPT Hybrid (Pure SC-GOA refine) - STM32
  *  - MPPT dipanggil tiap 10 ms (charging_flow()).
- *  - PnO yang kamu punya dipakai untuk "bring-up conduction"
- *    (karena PnO kamu terbukti robust di hardware).
- *  - GOA dipakai setelah arus benar-benar sudah masuk (konduksi).
+ *  - Pure SC-GOA dijalankan terus selama fase BULK aktif.
+ *  - Tidak ada fallback ke PnO/startup heuristic agar perilaku
+ *    konsisten dengan model SCA MATLAB yang kamu kirim.
  *
  *  REVIEW & HW-NOTES (2024-xx):
  *  - Loop 10 ms tidak mengandung blocking/malloc; satu-satunya jitter
  *    berasal dari RNG metaheuristik (sengaja). ISR ADC -> flag_adc_done
  *    sudah jadi gating utama.
- *  - Risiko wrap duty saat decrement PnO (uint16 underflow) diperbaiki
- *    dengan saturating-decrement agar tidak loncat ke MAX_PERIOD.
- *  - PnO hanya starter/anchor; setelah handover ke GOA tidak ada
- *    rollback kecuali PV/input benar-benar hilang (lihat reset).
- *  - State PnO (prev power/voltage) ikut di-reset supaya handoff antar
- *    siklus bersih dan deterministik.
+ *  - Search agent dipertahankan di domain duty dan dievaluasi lewat
+ *    hold+average power untuk mengurangi bias ripple switching.
  *
  *  KUNCI FIX dibanding versi bug:
  *  (1) PWM_VALUE dijadikan source of truth duty.
@@ -143,13 +144,16 @@ static float randn_approx(void)
 #define DUTY_LB_F           0.10f
 #define DUTY_UB_F           0.60f
 
-/* GOA parameters (sesuai MATLAB kamu) */
-#define GOA_ALPHA           0.00125f
-#define GOA_BETA            0.90f
-#define GOA_JPROB           0.10f
-#define GOA_STAG_LIMIT      10
-#define GOA_REPLACE_RATIO   0.15f
-#define GOA_IMPROVE_TH      0.02f     // 2% improve
+/* SC-GOA parameters (mengacu SCA MATLAB + formulasi TEX) */
+#define SCA_A0              2.0f
+#define SCA_A_MIN           0.1f
+#define SCA_DECAY_STEP      100.0f
+#define SCA_R3_MIN          0.7f
+#define SCA_R3_SPAN         0.3f
+#define SCA_ALPHA_STEP      0.6f
+#define SCA_BETA_MOM        0.4f
+#define SCGOA_EMA_ALPHA     0.3f
+#define SCGOA_REINIT_IT     50u
 
 /* “near convergence” (sesuai MATLAB) */
 #define CONV_WINDOW         0.12f
@@ -224,8 +228,6 @@ static float randn_approx(void)
  * ============================================================ */
 static uint8_t  hyb_isInit = 0;
 
-/* phase flags */
-static uint8_t  pno_active = 1;
 
 /* PV loss debounce */
 static uint16_t pv_loss_cnt = 0;
@@ -257,6 +259,7 @@ static float goats_D[N_GOAT];
 static float goats_P[N_GOAT];
 static float goats_prevP[N_GOAT];
 static uint8_t stag_cnt[N_GOAT];
+static float goat_vel[N_GOAT];
 
 /* GOA best */
 static float gbest_D = 0.10f;
@@ -276,6 +279,7 @@ static uint8_t  eval_holding = 0;
 static uint8_t  eval_settle = 0;
 static uint8_t  eval_avg_cnt = 0;
 static uint32_t eval_sumP = 0;
+static uint32_t scgoa_iter = 0;
 
 /* duty memory */
 static uint16_t Dold_pwm = 0;
@@ -296,8 +300,6 @@ void MPPT_Hybrid_Reset(void)
 {
     /* Tandai perlu inisialisasi ulang pada pemanggilan berikutnya. */
     hyb_isInit     = 0;
-    /* Mulai lagi dari fase PnO agar konduksi aman. */
-    pno_active     = 1;
     /* Hapus debounce PV loss & konduksi. */
     pv_loss_cnt    = 0;
     pv_win_idx     = 0;
@@ -331,14 +333,11 @@ void MPPT_Hybrid_Reset(void)
     eval_settle    = 0;
     eval_avg_cnt   = 0;
     eval_sumP      = 0;
+    scgoa_iter     = 0;
 
     /* Reset solusi terbaik ke batas bawah duty. */
     gbest_P        = 0.0f;
     gbest_D        = DUTY_LB_F;
-
-    /* Reset memori PnO supaya tidak bawa sejarah tegangan/daya lama. */
-    prevPowerInput = 0;
-    prevVoltagePv  = 0;
 
     /* NOTE:
      * Jangan paksa PWM_VALUE=0 di reset function kalau kamu panggil reset
@@ -365,7 +364,7 @@ void MPPT_Hybrid(void)
     }
 
     /* ========================================================
-     * 1) Ambil data sensor (DISPLAY SCALED, konsisten dengan PnO)
+     * 1) Ambil data sensor (DISPLAY SCALED)
      * ======================================================== */
     uint16_t Vpv  = dis_voltage_pv;  /* Tegangan PV display-scaled. */
     uint16_t Ipv  = dis_current_pv;  /* Arus PV display-scaled. */
@@ -410,7 +409,7 @@ void MPPT_Hybrid(void)
     sync_pwm_outputs(PWM_VALUE);     /* Sinkron duty + persen UI dengan nilai PWM terakhir. */
 
     /* ========================================================
-     * 4) Proteksi charge (ikut gaya robust PnO kamu)
+     * 4) Proteksi charge (mode BULK)
      *    Kalau overcurrent/overvoltage -> turunin duty 1 step dan keluar.
      * ======================================================== */
     if (dis_current_bat > MAX_CURRENT_CHARGE) {
@@ -418,8 +417,6 @@ void MPPT_Hybrid(void)
         if (duty_cycle > 0) duty_cycle--;
         sync_pwm_outputs(duty_cycle);
 
-        /* Balik ke PnO agar stabil setelah kondisi aman. */
-        pno_active = 1;
         cond_cnt = 0;
         UPDATE_TRENDS(Vpv, Ppv32);
         return;
@@ -430,7 +427,6 @@ void MPPT_Hybrid(void)
         sync_pwm_outputs(duty_cycle);
 
         /* Reset gating konduksi agar GOA tidak aktif saat proteksi. */
-        pno_active = 1;
         cond_cnt = 0;
         UPDATE_TRENDS(Vpv, Ppv32);
         return;
@@ -458,6 +454,7 @@ void MPPT_Hybrid(void)
             goats_P[i]      = 0.0f;
             goats_prevP[i]  = 0.0f;
             stag_cnt[i]     = 0;
+            goat_vel[i]     = 0.0f;
         }
 
         /* anchor gbest ke duty real sekarang (bukan hardcode) */
@@ -474,9 +471,9 @@ void MPPT_Hybrid(void)
         eval_settle   = 0;
         eval_avg_cnt  = 0;
         eval_sumP     = 0;
+        scgoa_iter    = 0;
 
-        /* mulai dari PnO startup (biar masuk konduksi dulu) */
-        pno_active = 1;
+        /* Pure SC-GOA: tidak ada startup/fallback PnO */
         cond_cnt   = 0;
 
         hyb_isInit = 1;
@@ -541,60 +538,7 @@ void MPPT_Hybrid(void)
 #endif
 
     /* ========================================================
-     * 8) PHASE 1: PnO proven kamu (startup / anti-stuck)
-     *    - PnO akan “mendorong” duty sampai ada arus masuk stabil.
-     * ======================================================== */
-    if (pno_active)
-    {
-        /* jalankan PnO kamu (yang sudah proven robust) */
-        MPPT_PnO();
-
-        /* setelah MPPT_PnO(), duty_cycle & PWM_VALUE sudah di-set oleh PnO */
-        sync_pwm_outputs(PWM_VALUE);
-
-        /* Handoff ke GOA kalau arus sudah masuk stabil */
-        if (cond_cnt >= COND_STABLE_N)
-        {
-            pno_active = 0;          // masuk GOA
-
-            /* anchor GOA */
-            gbest_D = (float)PWM_VALUE / (float)MAX_PERIOD;
-            gbest_P = (float)Ppv32;
-
-            /* reseed populasi di sekitar anchor (sesuai MATLAB) */
-            float span  = 0.20f; // ±0.10
-            float newLB = gbest_D - 0.5f * span;
-            float newUB = gbest_D + 0.5f * span;
-            if (newLB < DUTY_LB_F) newLB = DUTY_LB_F;
-            if (newUB > DUTY_UB_F) newUB = DUTY_UB_F;
-
-            for (int i = 0; i < N_GOAT; i++) {
-                goats_D[i]      = newLB + (newUB - newLB) * rand01();
-                goats_P[i]      = 0.0f;
-                goats_prevP[i]  = 0.0f;
-                stag_cnt[i]     = 0;
-            }
-
-            state_goa     = 1;
-            goat_idx      = 1;
-            prev_goat_idx = 0;
-            conv_counter  = 0;
-            t_goa         = 1;
-
-            eval_holding  = 0;
-            eval_settle   = 0;
-            eval_avg_cnt  = 0;
-            eval_sumP     = 0;
-
-            /* jangan return, biar loop berikutnya GOA mulai rapi */
-        }
-
-        UPDATE_TRENDS(Vpv, Ppv32);
-        return; // PHASE 1 selesai di sini
-    }
-
-    /* ========================================================
-     * 9) PHASE 2: GOA refine (MATLAB-like) dengan hold+avg fitness
+     * 8) PHASE SC-GOA PURE: evaluate + update
      * ======================================================== */
     uint16_t pwm_min = (uint16_t)(DUTY_LB_F * (float)MAX_PERIOD + 0.5f);
     uint16_t pwm_max = (uint16_t)(DUTY_UB_F * (float)MAX_PERIOD + 0.5f);
@@ -669,10 +613,12 @@ void MPPT_Hybrid(void)
         }
     }
 
-    /* ---------- STATE 2: UPDATE ---------- */
+    /* ---------- STATE 2: UPDATE (SC-GOA: SCA + momentum + goat refresh) ---------- */
     if (state_goa == 2)
     {
-        /* (1) local best */
+        scgoa_iter++;
+
+        /* (1) local best + global best */
         lbest_P = goats_P[0];
         lbest_D = goats_D[0];
         for (int i = 1; i < N_GOAT; i++) {
@@ -681,29 +627,12 @@ void MPPT_Hybrid(void)
                 lbest_D = goats_D[i];
             }
         }
-
-        /* (2) update global best jika improve > 2% */
-        if (gbest_P > 0.0f) {
-            float rel = (lbest_P - gbest_P) / gbest_P;
-            if (rel > GOA_IMPROVE_TH) {
-                gbest_P = lbest_P;
-                gbest_D = lbest_D;
-            }
-        } else {
+        if (lbest_P > gbest_P) {
             gbest_P = lbest_P;
             gbest_D = lbest_D;
         }
 
-        /* (3) init goats_prevP sekali */
-        uint8_t all_zero = 1;
-        for (int i = 0; i < N_GOAT; i++) {
-            if (goats_prevP[i] != 0.0f) { all_zero = 0; break; }
-        }
-        if (all_zero) {
-            for (int i = 0; i < N_GOAT; i++) goats_prevP[i] = goats_P[i];
-        }
-
-        /* (4) near convergence by D_span */
+        /* (2) near convergence by D-span */
         float dmax = goats_D[0], dmin = goats_D[0];
         for (int i = 1; i < N_GOAT; i++) {
             if (goats_D[i] > dmax) dmax = goats_D[i];
@@ -713,83 +642,46 @@ void MPPT_Hybrid(void)
         if (D_span < CONV_WINDOW) conv_counter++;
         else conv_counter = 0;
 
-        uint8_t isNear = (conv_counter >= CONV_COUNT_LIMIT);
-
-        /* (5) effective params (MATLAB-like) */
-        float alpha_eff = isNear ? (0.05f * GOA_ALPHA) : GOA_ALPHA;
-        float jprob_eff = isNear ? (0.6f  * GOA_JPROB) : GOA_JPROB;
-        float repl_eff  = isNear ? 0.0f : GOA_REPLACE_RATIO;
-
-        float beta_eff  = (t_goa < 5) ? (0.5f * GOA_BETA) : GOA_BETA;
-
-        /* (6) update goats */
-        float BW = (DUTY_UB_F - DUTY_LB_F);
+        /* (3) SCA adaptive amplitude */
+        float a_param = SCA_A0 * (1.0f - ((float)scgoa_iter / SCA_DECAY_STEP));
+        if (a_param < SCA_A_MIN) a_param = SCA_A_MIN;
 
         for (int i = 0; i < N_GOAT; i++)
         {
-            /* stagnation counter */
-            if (goats_P[i] < goats_prevP[i]) {
-                if (stag_cnt[i] < GOA_STAG_LIMIT) stag_cnt[i]++;
-            } else {
-                stag_cnt[i] = 0;
-            }
+            float r1 = a_param * (2.0f * rand01() - 1.0f);
+            float r2 = 2.0f * 3.1415926f * rand01();
+            float r3 = SCA_R3_MIN + SCA_R3_SPAN * rand01();
+            float r4 = rand01();
 
-            float stagn_norm = (float)stag_cnt[i] / (float)GOA_STAG_LIMIT;
-            if (stagn_norm > 1.0f) stagn_norm = 1.0f;
+            float dist = fabsf(r3 * gbest_D - goats_D[i]);
+            float delta = (r4 < 0.5f) ? (r1 * sinf(r2) * dist)
+                                      : (r1 * cosf(r2) * dist);
 
-            float jump_prob = jprob_eff + 0.5f * stagn_norm;
-            if (jump_prob > 0.9f) jump_prob = 0.9f;
-
-            float Dnew = goats_D[i];
-
-            /* exploit */
-            Dnew += beta_eff * rand01() * (gbest_D - Dnew);
-
-            /* explore */
-            Dnew += alpha_eff * randn_approx() * BW;
-
-            /* jump */
-            if (rand01() < jump_prob) {
-                int j = (int)(rand01() * (float)N_GOAT);
-                if (j >= N_GOAT) j = N_GOAT - 1;
-                Dnew += rand01() * (goats_D[j] - Dnew);
-                stag_cnt[i] = 0;
-            }
-
-            /* clamp */
+            float Dnew = goats_D[i] + SCA_ALPHA_STEP * delta + SCA_BETA_MOM * goat_vel[i];
             if (Dnew < DUTY_LB_F) Dnew = DUTY_LB_F;
             if (Dnew > DUTY_UB_F) Dnew = DUTY_UB_F;
 
+            goat_vel[i] = Dnew - goats_D[i];
             goats_D[i] = Dnew;
         }
 
-        /* (7) parasite avoidance */
-        if (repl_eff > 0.0f)
-        {
-            int num_worst = (int)floorf(repl_eff * (float)N_GOAT);
-            if (num_worst < 1) num_worst = 1;
-
-            for (int k = 0; k < num_worst; k++) {
-                int worst_i = 0;
-                float worstP = goats_P[0];
-                for (int i = 1; i < N_GOAT; i++) {
-                    if (goats_P[i] < worstP) { worstP = goats_P[i]; worst_i = i; }
-                }
-                goats_D[worst_i] = DUTY_LB_F + BW * rand01();
+        /* (4) diversity maintenance: re-init worst goat periodik */
+        if ((scgoa_iter % SCGOA_REINIT_IT) == 0u) {
+            int worst_i = 0;
+            float worstP = goats_P[0];
+            for (int i = 1; i < N_GOAT; i++) {
+                if (goats_P[i] < worstP) { worstP = goats_P[i]; worst_i = i; }
             }
+            goats_D[worst_i] = DUTY_LB_F + (DUTY_UB_F - DUTY_LB_F) * rand01();
+            goat_vel[worst_i] = 0.0f;
         }
 
-        for (int i = 0; i < N_GOAT; i++) goats_prevP[i] = goats_P[i];
-
-        t_goa++; if (t_goa > 10) t_goa = 1;
-
-        /* next cycle */
         state_goa     = 1;
         goat_idx      = 1;
         prev_goat_idx = 0;
 
-        /* command gbest (apply PWM with slew) */
-        float Dcmd = gbest_D;
+        /* (5) EMA smoothing pada duty keluaran */
+        float Dcmd = SCGOA_EMA_ALPHA * gbest_D + (1.0f - SCGOA_EMA_ALPHA) * ((float)Dold_pwm / (float)MAX_PERIOD);
         if (Dcmd < DUTY_LB_F) Dcmd = DUTY_LB_F;
         if (Dcmd > DUTY_UB_F) Dcmd = DUTY_UB_F;
 
@@ -800,63 +692,28 @@ void MPPT_Hybrid(void)
             pwm_cmd = psu_limit_ceiling;
         }
 #endif
-
         int diff = (int)pwm_cmd - (int)Dold_pwm;
         uint16_t maxStep = (conv_counter >= CONV_COUNT_LIMIT) ? 1u : MAX_DELTA_PWM;
         if (diff > (int)maxStep) pwm_cmd = Dold_pwm + maxStep;
         else if (diff < -(int)maxStep) pwm_cmd = Dold_pwm - maxStep;
 
-        sync_pwm_outputs(pwm_cmd); // sync
-        Dold_pwm    = pwm_cmd;
+        sync_pwm_outputs(pwm_cmd);
+        Dold_pwm = pwm_cmd;
         UPDATE_TRENDS(Vpv, Ppv32);
         return;
     }
 
-    /* fallback kalau state corrupt -> balik PnO */
+    /* fallback kalau state corrupt -> reset mesin SC-GOA */
     UPDATE_TRENDS(Vpv, Ppv32);
-    pno_active = 1;
+    state_goa = 1;
+    goat_idx = 1;
+    prev_goat_idx = 0;
 }
 // =============================================================
-
-
-/* Perturb-and-Observe sederhana untuk fase startup/anti-stuck. */
-void MPPT_PnO(void) {
-	/* Proteksi cepat berbasis arus/tegangan baterai. */
-	if(dis_current_bat > MAX_CURRENT_CHARGE)		{ if (duty_cycle > 0) duty_cycle--; }
-	else if(dis_voltage_bat > MAX_BATTERY_CHARGE)	{ if (duty_cycle > 0) duty_cycle--; }
-	else {
-		/* Bandingkan daya/tegangan saat ini dengan sebelumnya
-		 * untuk memutuskan arah perturbasi duty. */
-		if(dis_power_pv > prevPowerInput && dis_voltage_pv > prevVoltagePv)		{ if (duty_cycle > 0) duty_cycle--; }
-		else if(dis_power_pv > prevPowerInput && dis_voltage_pv < prevVoltagePv)	{ duty_cycle++; }
-		else if(dis_power_pv < prevPowerInput && dis_voltage_pv > prevVoltagePv)	{ duty_cycle++; }
-		else if(dis_power_pv < prevPowerInput && dis_voltage_pv < prevVoltagePv)	{ if (duty_cycle > 0) duty_cycle--; }
-		else if(dis_voltage_bat < MAX_BATTERY_CHARGE)								{ duty_cycle++; }
-
-		/* Simpan daya/tegangan sebagai referensi langkah berikutnya. */
-		prevPowerInput = dis_power_pv;
-		prevVoltagePv = dis_voltage_pv;
-	}
-	/* Jaga duty dalam batas PWM yang diizinkan. */
-	if(duty_cycle >= MAX_PERIOD) {
-		duty_cycle = MAX_PERIOD;
-	}
-	else if(duty_cycle <= 0) {
-		duty_cycle = 0;
-	}
-    /* jika escape hatch PSU aktif, jangan melewati ceiling */
-#if ENABLE_PSU_ESCAPE
-    if (psu_limit_relax > 0 && psu_limit_ceiling > 0 && duty_cycle > psu_limit_ceiling) {
-        duty_cycle = psu_limit_ceiling;
-    }
-#endif
-	/* Propagasi hasil perturbasi ke register PWM & persen untuk UI. */
-	sync_pwm_outputs(duty_cycle);
-}
 /* ============================================================
  *  CHARGING FLOW ROBUST (deci-Volt & deci-Amp: 0.1V, 0.1A)
  *  MPPT dipanggil tiap 10 ms
- *  - BULK: MPPT (Hybrid / PnO)
+ *  - BULK: MPPT Hybrid SC-GOA
  *  - CV  : jaga Vabs
  *  - FLOAT: jaga Vfloat
  *  Transisi pakai hysteresis + "counter naik/turun" (anti noise)
@@ -1193,7 +1050,7 @@ void charging_flow(void)
     /* ===================== STAGE 1: BULK (MPPT) ===================== */
     if (flag_charging_Bulk)
     {
-        MPPT_Hybrid();  // atau MPPT_PnO() untuk test A/B
+        MPPT_Hybrid();  // MPPT SC-GOA (pure)
 
         /* A) Masuk CV kalau Vbat cukup tinggi dan arus masih ada */
         uint8_t ok_voltage_cv = (Vbat >= VABS_ENTER_MIN);
