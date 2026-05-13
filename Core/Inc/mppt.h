@@ -1,3 +1,9 @@
+/*
+ * File Role    : Deklarasi algoritma MPPT hibrid (PnO + Goat Optimizer Algorithm/GOA) dan state machine charging.
+ * Dependencies : stm32f1xx_hal.h untuk tipe dasar dan akses ke waktu/HAL.
+ * Fungsi inti  : MPPT_Hybrid(), MPPT_Hybrid_Reset(), check_initial_state(), charging_flow()
+ *                beserta flag status (flag_charging_*, flag_adc_done, dbg_limit_psu).
+ */
 #ifndef MPPT_H
 #define MPPT_H
 

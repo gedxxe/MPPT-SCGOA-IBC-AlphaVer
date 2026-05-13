@@ -23,6 +23,9 @@
 /* Includes */
 #include <errno.h>
 #include <stdint.h>
+/* File Role    : Implementasi _sbrk untuk manajemen heap newlib di lingkungan bare-metal.
+ * Dependencies : stdint/errno; digunakan oleh malloc dan keluarga di libc.
+ * Fungsi inti  : _sbrk() dipanggil implisit oleh allocator untuk memperluas heap. */
 
 /**
  * Pointer to the current high watermark of the heap usage

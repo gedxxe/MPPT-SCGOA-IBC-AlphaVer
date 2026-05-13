@@ -20,6 +20,9 @@
 
 /* Includes ------------------------------------------------------------------*/
 #include "main.h"
+/* File Role    : Inisialisasi MSP (clock, GPIO, interrupt) untuk peripheral yang dipakai.
+ * Dependencies : main.h untuk handle global dan definisi pin.
+ * Fungsi inti  : HAL_MspInit serta inisialisasi khusus ADC/I2C/TIM dari CubeMX. */
 /* USER CODE BEGIN Includes */
 
 /* USER CODE END Includes */

@@ -20,6 +20,9 @@
 /* Includes ------------------------------------------------------------------*/
 #include "main.h"
 #include "stm32f1xx_it.h"
+/* File Role    : Mengelola ISR inti (fault handler, SysTick, DMA, timer) untuk firmware.
+ * Dependencies : main.h untuk akses handle peripheral; stm32f1xx_it.h untuk deklarasi ISR.
+ * Fungsi inti  : Implementasi rutin interrupt standar HAL (DMA1_Channel1_IRQHandler, TIMx). */
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
 /* USER CODE END Includes */

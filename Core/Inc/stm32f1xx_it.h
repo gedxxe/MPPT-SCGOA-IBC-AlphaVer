@@ -27,7 +27,9 @@ extern "C" {
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
-
+/* File Role    : Deklarasi handler interrupt inti (fault, SysTick, DMA, TIM).
+ * Dependencies : stm32f1xx_hal.h membawa definisi tipe handler HAL.
+ * Fungsi inti  : Prototipe ISR yang terhubung ke tabel vektor dan diimplementasi di stm32f1xx_it.c. */
 /* USER CODE END Includes */
 
 /* Exported types ------------------------------------------------------------*/

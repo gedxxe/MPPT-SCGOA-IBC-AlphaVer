@@ -40,8 +40,13 @@
   * in the root directory of this software component.
   * If no LICENSE file comes with this software, it is provided AS-IS.
   *
-  ******************************************************************************
+ ******************************************************************************
   */
+
+/* File Role    : Menyediakan konfigurasi clock sistem (SystemInit) dan utilitas
+ *                pembaruan SystemCoreClock sesuai standar CMSIS.
+ * Dependencies : Header perangkat stm32f1xx.h; dipanggil sebelum main oleh startup.
+ * Fungsi inti  : SystemInit(), SystemCoreClockUpdate(), serta variabel SystemCoreClock. */
 
 /** @addtogroup CMSIS
   * @{

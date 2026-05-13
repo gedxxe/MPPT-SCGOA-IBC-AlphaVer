@@ -29,7 +29,10 @@
 #include <time.h>
 #include <sys/time.h>
 #include <sys/times.h>
-
+/* File Role    : Menyediakan stub syscall minimal (newlib) agar fungsi standar C
+ *                berjalan di lingkungan bare-metal STM32.
+ * Dependencies : stdlib, sys headers; bergantung pada implementasi __io_putchar/getchar di HAL.
+ * Fungsi inti  : Implementasi _write, _sbrk, _close, dsb. untuk dukungan libc. */
 
 /* Variables */
 extern int __io_putchar(int ch) __attribute__((weak));

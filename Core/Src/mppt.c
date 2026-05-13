@@ -1,8 +1,19 @@
+/*
+ * File Role    : Implementasi algoritma MPPT hybrid (Perturb & Observe untuk start,
+ *                dilanjutkan Goat Optimizer Algorithm/GOA) beserta state machine
+ *                charging Bulk/CV/Float dan proteksi input.
+ * Dependencies : main.h untuk akses data ADC ter-skala, PWM_VALUE, flag charging,
+ *                serta HAL timing; math.h untuk operasi float (log, pow).
+ * Fungsi inti  : MPPT_Hybrid(), MPPT_Hybrid_Reset(), check_initial_state(), charging_flow().
+ */
 #include "main.h"
 #include <math.h>
+#include <stdint.h>
+#include "adc_sampling.h"   // extern uint16_t dis_voltage_pv, dis_current_pv;
+#include "pwm.h"            // extern uint16_t PWM_VALUE; extern int duty_percent; #define MAX_PERIOD ...
 
 /* ============================================================
- *  STATE MACHINE & VERIF SNAPSHOT (2024-11)
+ *  STATE MACHINE & VERIF SNAPSHOT (2026-01)
  *  - States:
  *      BULK  : MPPT_Hybrid() mengejar daya, guard konduksi & proteksi.
  *      CV    : Penahan Vabs dengan hysteresis ±VABS_HYST, anti-flap via timer.
@@ -86,6 +97,26 @@ static inline uint16_t clamp_u16(uint16_t x, uint16_t lo, uint16_t hi)
     return x;
 }
 
+static inline uint16_t abs_diff_u16(uint16_t a, uint16_t b)
+{
+    return (a > b) ? (a - b) : (b - a);
+}
+
+/* Sinkronisasi register PWM + duty + persen untuk UI. */
+static inline void sync_pwm_outputs(uint16_t pwm)
+{
+    PWM_VALUE   = pwm;
+    duty_cycle  = pwm;
+    duty_percent = (PWM_VALUE * 100) / MAX_PERIOD;
+}
+
+/* Forward deklarasi helper resume-duty agar bisa dipakai di fungsi awal. */
+static inline void update_resume_bookmark(uint16_t Vpv, uint16_t Ipv, uint16_t pwm_now);
+static inline void arm_resume_from_bookmark(uint16_t Vpv_now, uint16_t pwm_now);
+static inline uint16_t pv_window_push(uint16_t Vpv);
+static inline void clear_resume_snapshot(void);
+static inline void pv_window_reseed(uint16_t Vpv_seed);
+
 /* ---------- RNG ringan (lebih “STM32-friendly” daripada rand()) ---------- */
 static float rand01(void)
 {
@@ -150,6 +181,18 @@ static float randn_approx(void)
 #define PV_LOSS_I_TH        1u      // contoh: 0.1A kalau display unit 0.1A
 #define PV_LOSS_COUNT_N     50u     // 50 * 10ms = 500ms
 
+/* Resume window pasca PV-loss (10 ms per tick) */
+#define RESUME_MAX_LOSS_TICKS 500u   // 5.0s maksimum jeda untuk boleh resume
+#define RESUME_DVPV_WINDOW    20u    // 2.0V band kecocokan tegangan PV (tolak ukur resume)
+/* Headroom untuk menyimpan snapshot sebelum tegangan benar-benar ambruk. */
+#define PV_RESUME_HEADROOM    30u    // 3.0V di atas ambang PV_LOSS_V_TH
+#define PV_RESUME_DEADBAND    15u    // 1.5V deadband validasi resume berbasis rata-rata
+#define PV_RESUME_MIN_V       80u    // 8.0V: minimum valid untuk boleh resume duty
+#define PV_WINDOW_COUNT       10u    // 10 sampel @10ms ~100ms smoothing Vpv
+#define PV_ARM_BAND           8u     // 0.8V: syarat minimal untuk arm snapshot (lebih ketat)
+#define PV_DROP_DV_TH         12u    // 1.2V per 10ms dianggap drop tajam PSU
+#define PV_DROP_COUNT_MAX     5u     // 5 sampel berturut-turut drop tajam => anggap loss keras
+
 /* ---------- Conduction gate ----------
  * GOA jangan jalan sebelum ada arus masuk beneran.
  * Threshold pakai arus baterai (lebih “jujur” untuk charging).
@@ -186,6 +229,14 @@ static uint8_t  pno_active = 1;
 
 /* PV loss debounce */
 static uint16_t pv_loss_cnt = 0;
+static uint16_t pv_win_idx = 0;
+static uint16_t pv_win_cnt = 0;
+static uint32_t pv_win_sum = 0;
+static uint16_t pv_win_buf[PV_WINDOW_COUNT] = {0};
+static uint16_t pv_window_avg = 0;
+static uint16_t pv_last_sample = 0;
+static uint8_t  pv_drop_cnt = 0;
+static uint8_t  pv_window_frozen = 0;
 
 /* conduction stable debounce */
 static uint16_t cond_cnt = 0;
@@ -249,6 +300,13 @@ void MPPT_Hybrid_Reset(void)
     pno_active     = 1;
     /* Hapus debounce PV loss & konduksi. */
     pv_loss_cnt    = 0;
+    pv_win_idx     = 0;
+    pv_win_cnt     = 0;
+    pv_win_sum     = 0;
+    pv_window_avg  = 0;
+    pv_last_sample = 0;
+    pv_drop_cnt    = 0;
+    pv_window_frozen = 0;
     cond_cnt       = 0;
 
 #if ENABLE_PSU_ESCAPE
@@ -290,11 +348,6 @@ void MPPT_Hybrid_Reset(void)
 
 //=======================================================
 
-
-#include <stdint.h>
-#include "adc_sampling.h"   // extern uint16_t dis_voltage_pv, dis_current_pv;
-#include "pwm.h"            // extern uint16_t PWM_VALUE; extern int duty_percent; #define MAX_PERIOD ...
-
 /* ============================================================
  *  MPPT HYBRID MAIN
  * ============================================================ */
@@ -326,7 +379,10 @@ void MPPT_Hybrid(void)
      * 2) PV-loss detector (AND + debounce)
      *    Tujuan: kalau PV benar-benar putus, reset MPPT total.
      * ======================================================== */
-    uint8_t pv_low = (Vpv <= PV_LOSS_V_TH) && (Ipv <= PV_LOSS_I_TH);
+    uint8_t pv_low_inst = (Vpv <= PV_LOSS_V_TH) && (Ipv <= PV_LOSS_I_TH);
+    uint8_t pv_low_avg  = (pv_window_avg <= (PV_LOSS_V_TH + PV_RESUME_DEADBAND)) && (Ipv <= PV_LOSS_I_TH);
+    uint8_t pv_drop_fast = (pv_drop_cnt >= PV_DROP_COUNT_MAX); /* drop tajam berturut-turut */
+    uint8_t pv_low = pv_low_inst || pv_low_avg || pv_drop_fast;
 
     if (pv_low) {
         if (pv_loss_cnt < PV_LOSS_COUNT_N) pv_loss_cnt++;
@@ -336,9 +392,10 @@ void MPPT_Hybrid(void)
 
     if (pv_loss_cnt >= PV_LOSS_COUNT_N) {
         /* PV benar-benar hilang -> matikan PWM + reset state */
-        PWM_VALUE = 0;        /* Matikan PWM fisik. */
-        duty_cycle = 0;       /* Sinkron duty internal. */
-        duty_percent = 0;     /* Nol-kan persentase untuk UI. */
+        if (pv_drop_fast) clear_resume_snapshot(); /* jangan pakai duty lama jika drop tajam */
+        arm_resume_from_bookmark(Vpv, PWM_VALUE);
+
+        sync_pwm_outputs(0);  /* Matikan PWM fisik + sinkron UI. */
 
         MPPT_Hybrid_Reset();  /* Bersihkan state algoritma. */
         pv_loss_cnt = 0;      /* Reset debounce agar siap deteksi ulang. */
@@ -350,7 +407,7 @@ void MPPT_Hybrid(void)
      * 3) Sinkronisasi DUTY (FIX paling krusial)
      *    PWM_VALUE harus jadi satu-satunya truth.
      * ======================================================== */
-    duty_cycle = PWM_VALUE;          /* Sinkron duty internal dengan nilai PWM terakhir. */
+    sync_pwm_outputs(PWM_VALUE);     /* Sinkron duty + persen UI dengan nilai PWM terakhir. */
 
     /* ========================================================
      * 4) Proteksi charge (ikut gaya robust PnO kamu)
@@ -359,8 +416,7 @@ void MPPT_Hybrid(void)
     if (dis_current_bat > MAX_CURRENT_CHARGE) {
         /* Kurangi duty satu langkah untuk meredam arus berlebih. */
         if (duty_cycle > 0) duty_cycle--;
-        PWM_VALUE = duty_cycle;
-        duty_percent = (PWM_VALUE * 100) / MAX_PERIOD;
+        sync_pwm_outputs(duty_cycle);
 
         /* Balik ke PnO agar stabil setelah kondisi aman. */
         pno_active = 1;
@@ -371,8 +427,7 @@ void MPPT_Hybrid(void)
     if (dis_voltage_bat > MAX_BATTERY_CHARGE) {
         /* Turunkan duty jika tegangan baterai melewati batas bulk. */
         if (duty_cycle > 0) duty_cycle--;
-        PWM_VALUE = duty_cycle;
-        duty_percent = (PWM_VALUE * 100) / MAX_PERIOD;
+        sync_pwm_outputs(duty_cycle);
 
         /* Reset gating konduksi agar GOA tidak aktif saat proteksi. */
         pno_active = 1;
@@ -392,8 +447,7 @@ void MPPT_Hybrid(void)
 
         /* kalau PWM masih 0, naikkan ke minimal domain */
         if (PWM_VALUE < pwm_min) {
-            PWM_VALUE  = pwm_min;
-            duty_cycle = pwm_min;
+            sync_pwm_outputs(pwm_min);
         }
 
         Dold_pwm = PWM_VALUE;
@@ -462,8 +516,7 @@ void MPPT_Hybrid(void)
         dbg_limit_psu     = 1;                 /* logging ringan untuk UI / debug */
 
         if (PWM_VALUE > 0) PWM_VALUE--;        /* redam 1 step supaya sag berhenti */
-        duty_cycle   = PWM_VALUE;
-        duty_percent = (PWM_VALUE * 100) / MAX_PERIOD;
+        sync_pwm_outputs(PWM_VALUE);
     }
 
     /* selama relaksasi, jangan biarkan duty melampaui ceiling */
@@ -471,8 +524,7 @@ void MPPT_Hybrid(void)
         psu_limit_relax--;
 
         if (psu_limit_ceiling > 0 && PWM_VALUE > psu_limit_ceiling) {
-            PWM_VALUE = psu_limit_ceiling;
-            duty_cycle = PWM_VALUE;
+            sync_pwm_outputs(psu_limit_ceiling);
         }
 
         /* lepas relaksasi hanya jika Vpv sudah recovery dan arus turun */
@@ -498,7 +550,7 @@ void MPPT_Hybrid(void)
         MPPT_PnO();
 
         /* setelah MPPT_PnO(), duty_cycle & PWM_VALUE sudah di-set oleh PnO */
-        duty_percent = (PWM_VALUE * 100) / MAX_PERIOD;
+        sync_pwm_outputs(PWM_VALUE);
 
         /* Handoff ke GOA kalau arus sudah masuk stabil */
         if (cond_cnt >= COND_STABLE_N)
@@ -601,9 +653,7 @@ void MPPT_Hybrid(void)
             if (diff > (int)maxStep) pwm_cmd = Dold_pwm + maxStep;
             else if (diff < -(int)maxStep) pwm_cmd = Dold_pwm - maxStep;
 
-            PWM_VALUE   = pwm_cmd;
-            duty_cycle  = pwm_cmd; // sync
-            duty_percent = (PWM_VALUE * 100) / MAX_PERIOD;
+            sync_pwm_outputs(pwm_cmd); // sync
             Dold_pwm    = pwm_cmd;
 
             prev_goat_idx = goat_idx;
@@ -756,9 +806,7 @@ void MPPT_Hybrid(void)
         if (diff > (int)maxStep) pwm_cmd = Dold_pwm + maxStep;
         else if (diff < -(int)maxStep) pwm_cmd = Dold_pwm - maxStep;
 
-        PWM_VALUE   = pwm_cmd;
-        duty_cycle  = pwm_cmd; // sync
-        duty_percent = (PWM_VALUE * 100) / MAX_PERIOD;
+        sync_pwm_outputs(pwm_cmd); // sync
         Dold_pwm    = pwm_cmd;
         UPDATE_TRENDS(Vpv, Ppv32);
         return;
@@ -803,8 +851,7 @@ void MPPT_PnO(void) {
     }
 #endif
 	/* Propagasi hasil perturbasi ke register PWM & persen untuk UI. */
-	PWM_VALUE = duty_cycle;
-	duty_percent = (PWM_VALUE * 100) / MAX_PERIOD;
+	sync_pwm_outputs(duty_cycle);
 }
 /* ============================================================
  *  CHARGING FLOW ROBUST (deci-Volt & deci-Amp: 0.1V, 0.1A)
@@ -872,6 +919,119 @@ static uint32_t t_abs_enter_ticks = 0;
 /* latch PV hilang untuk re-evaluasi state saat PV kembali */
 static uint8_t pv_absent_latched = 0;
 
+/* Snapshot untuk resume duty pasca PV-loss */
+static uint16_t resume_pwm_last   = 0;
+static uint16_t resume_vpv_last   = 0;
+static uint16_t resume_loss_ticks = 0;
+static uint8_t  resume_armed      = 0;
+static uint16_t resume_pwm_bookmark = 0;
+static uint16_t resume_vpv_bookmark = 0;
+static uint16_t resume_bookmark_age = 0;
+static uint16_t resume_vpv_snapshot = 0; /* Vpv stabil saat bookmark diambil (anti anjlok akibat averaging) */
+static uint16_t resume_pwm_snapshot = 0; /* duty stabil saat bookmark diambil */
+static uint16_t stable_vpv_last     = 0; /* Vpv terakhir yang valid (untuk fallback resume <5s) */
+static uint16_t stable_pwm_last     = 0; /* PWM terakhir yang valid (untuk fallback resume <5s) */
+
+static inline void reset_flow_counters(void)
+{
+    t_enter_cv   = 0;
+    t_to_float   = 0;
+    t_bulk_float = 0;
+    t_rebulk     = 0;
+    t_bulk_highV = 0;
+    t_flow_ticks = 0;
+    t_abs_enter_ticks = 0;
+}
+
+static inline void clear_resume_snapshot(void)
+{
+    resume_pwm_last   = 0;
+    resume_vpv_last   = 0;
+    resume_loss_ticks = 0;
+    resume_armed      = 0;
+    resume_pwm_bookmark = 0;
+    resume_vpv_bookmark = 0;
+    resume_bookmark_age = 0;
+    resume_vpv_snapshot = 0;
+    resume_pwm_snapshot = 0;
+    stable_vpv_last     = 0;
+    stable_pwm_last     = 0;
+    pv_drop_cnt = 0;
+    pv_window_frozen = 0;
+}
+
+static inline uint16_t pv_window_push(uint16_t Vpv)
+{
+    /* deteksi slope turun tajam (per 10ms) untuk menganggap loss keras */
+    if (pv_last_sample > 0 && (pv_last_sample - Vpv) > PV_DROP_DV_TH) {
+        if (pv_drop_cnt < PV_DROP_COUNT_MAX) pv_drop_cnt++;
+    } else {
+        if (pv_drop_cnt > 0) pv_drop_cnt--;
+    }
+    pv_last_sample = Vpv;
+
+    if (pv_win_cnt < PV_WINDOW_COUNT) {
+        pv_win_buf[pv_win_idx] = Vpv;
+        pv_win_sum += Vpv;
+        pv_win_cnt++;
+    } else {
+        pv_win_sum -= pv_win_buf[pv_win_idx];
+        pv_win_buf[pv_win_idx] = Vpv;
+        pv_win_sum += Vpv;
+    }
+
+    pv_win_idx++;
+    if (pv_win_idx >= PV_WINDOW_COUNT) pv_win_idx = 0;
+
+    if (pv_win_cnt > 0) pv_window_avg = (uint16_t)(pv_win_sum / pv_win_cnt);
+    else pv_window_avg = Vpv;
+
+    return pv_window_avg;
+}
+
+static inline void pv_window_reseed(uint16_t Vpv_seed)
+{
+    pv_win_idx       = 0;
+    pv_win_cnt       = 1;
+    pv_win_sum       = Vpv_seed;
+    pv_window_avg    = Vpv_seed;
+    pv_last_sample   = Vpv_seed;
+    pv_drop_cnt      = 0;
+}
+
+static inline void update_resume_bookmark(uint16_t Vpv, uint16_t Ipv, uint16_t pwm_now)
+{
+    /* Simpan snapshot hanya saat PV benar-benar masih ada (tegangan & arus cukup). */
+    uint8_t pv_level_ok = (Vpv > (PV_LOSS_V_TH + PV_ARM_BAND)) && (Vpv >= PV_RESUME_MIN_V) ? 1u : 0u;
+    uint8_t pv_sane = pv_level_ok && (Ipv > PV_LOSS_I_TH);
+
+    if (pv_sane) {
+        resume_pwm_bookmark = pwm_now;
+        resume_vpv_bookmark = Vpv;
+        resume_bookmark_age = RESUME_MAX_LOSS_TICKS; /* tetap fresh selama ~5s tanpa PV. */
+        resume_vpv_snapshot = Vpv;
+        resume_pwm_snapshot = pwm_now;
+        stable_vpv_last     = Vpv;
+        stable_pwm_last     = pwm_now;
+    } else if (resume_bookmark_age > 0) {
+        resume_bookmark_age--; /* Hindari memakai snapshot terlalu lama setelah PV hilang. */
+    }
+}
+
+static inline void arm_resume_from_bookmark(uint16_t Vpv_now, uint16_t pwm_now)
+{
+    uint16_t snap_pwm = resume_pwm_bookmark ? resume_pwm_bookmark : (stable_pwm_last ? stable_pwm_last : pwm_now);
+    uint16_t snap_vpv = resume_vpv_bookmark ? resume_vpv_bookmark : (stable_vpv_last ? stable_vpv_last : ((pv_window_avg > PV_LOSS_V_TH) ? pv_window_avg : Vpv_now));
+
+    resume_pwm_last   = snap_pwm;
+    resume_vpv_last   = snap_vpv;
+    resume_vpv_snapshot = snap_vpv;
+    resume_pwm_snapshot = snap_pwm;
+    resume_loss_ticks = 0;
+    resume_armed      = 1;
+    resume_bookmark_age = 0;
+}
+
 /* ============================================================
  *  INITIAL STATE SELECTION (dipanggil saat relay bat di-on-kan)
  *  Menentukan titik awal charging berdasarkan tegangan baterai.
@@ -895,29 +1055,22 @@ void check_initial_state(void)
      *  - 27.5V..28.3V -> FLOAT (baterai sudah tinggi)
      *  - lainnya -> BULK
      */
-    t_flow_ticks      = 0;
-    t_abs_enter_ticks = 0;
+    reset_flow_counters();
 
     if (Vbat >= VABS_ENTER_MIN) {
         /* mendekati/past absorption -> mulai di CV */
         flag_charging_CV = 1;
         t_abs_enter_ticks = t_flow_ticks;  /* pastikan dwell dihitung dari start CV */
         /* mulai dengan duty rendah agar tidak langsung overshoot */
-        PWM_VALUE    = (uint16_t)(0.05f * (float)MAX_PERIOD);
-        duty_cycle   = PWM_VALUE;
-        duty_percent = (PWM_VALUE * 100) / MAX_PERIOD;
+        sync_pwm_outputs((uint16_t)(0.05f * (float)MAX_PERIOD));
     } else if (Vbat >= 275u) {
         /* baterai sudah tinggi -> langsung FLOAT */
         flag_charging_FLOAT = 1;
-        PWM_VALUE    = 0;    /* biarkan mengapung, duty nanti naik perlahan bila perlu */
-        duty_cycle   = 0;
-        duty_percent = 0;
+        sync_pwm_outputs(0); /* biarkan mengapung, duty nanti naik perlahan bila perlu */
     } else {
         /* default: mulai BULK (MPPT) */
         flag_charging_Bulk = 1;
-        PWM_VALUE    = 0;
-        duty_cycle   = 0;
-        duty_percent = 0;
+        sync_pwm_outputs(0);
     }
 
     /* izinkan charging */
@@ -928,13 +1081,7 @@ void charging_flow(void)
 {
     if (!flag_adc_done) {
         /* pastikan counter transisi tidak nyangkut saat charging tidak aktif */
-        t_enter_cv   = 0;
-        t_to_float   = 0;
-        t_bulk_float = 0;
-        t_rebulk     = 0;
-        t_bulk_highV = 0;
-        t_flow_ticks = 0;
-        t_abs_enter_ticks = 0;
+        reset_flow_counters();
 
         flag_adc_done = 0;
         return;
@@ -943,52 +1090,102 @@ void charging_flow(void)
     /* baca sensor */
     uint16_t Vbat = dis_voltage_bat;   // 0.1V
     uint16_t Ibat = dis_current_bat;   // 0.1A
+    uint16_t Vpv_now = dis_voltage_pv; // 0.1V
+    uint16_t Ipv_now = dis_current_pv; // 0.1A
     t_flow_ticks++;                    // tiap 10 ms
+    /* Hitung rata-rata Vpv (100ms window) untuk keputusan loss/resume yang lebih robust.
+     * Saat PV dianggap hilang (window frozen), gunakan sampel instan agar tidak terjebak di nilai nol. */
+    uint16_t Vpv_avg = pv_window_frozen ? (pv_window_avg ? pv_window_avg : Vpv_now) : pv_window_push(Vpv_now);
+    if (pv_window_frozen && Vpv_now > Vpv_avg) {
+        /* Paksa rata-rata mengikuti pemulihan PV supaya keluar dari status “absent” lebih cepat. */
+        pv_window_avg = Vpv_now;
+    }
+    uint8_t pv_drop_fast = (pv_drop_cnt >= PV_DROP_COUNT_MAX);
+    uint16_t Vpv_for_absent = pv_window_frozen ? Vpv_now : Vpv_avg;
+
+    /* Refresh bookmark untuk kemampuan resume (gunakan PV & duty terkini). */
+    uint16_t Vpv_for_bookmark = (Vpv_avg > Vpv_now) ? Vpv_avg : Vpv_now;
+    update_resume_bookmark(Vpv_for_bookmark, Ipv_now, PWM_VALUE);
 
     /* standby jika input PV/PSU benar-benar tidak ada */
-    uint8_t pv_absent = (dis_voltage_pv <= PV_LOSS_V_TH) && (dis_current_pv <= PV_LOSS_I_TH);
+    uint8_t pv_absent_voltage = (Vpv_now <= PV_LOSS_V_TH) || (Vpv_for_absent <= (PV_LOSS_V_TH + PV_RESUME_DEADBAND)) || pv_drop_fast;
+    uint8_t pv_absent = pv_absent_voltage && (Ipv_now <= PV_LOSS_I_TH);
     if (pv_absent) {
+        if (pv_drop_fast) {
+            clear_resume_snapshot(); /* drop keras: jangan reuse duty lama */
+            pv_window_frozen = 1;    /* hentikan averaging supaya nol tidak menyeret rata-rata */
+        } else if (!resume_armed) {
+            arm_resume_from_bookmark((Vpv_avg > Vpv_now) ? Vpv_avg : Vpv_now, PWM_VALUE);
+            pv_window_frozen = 1;    /* freeze window setelah loss terdeteksi */
+        }
+        if (resume_armed) {
+            if (resume_loss_ticks < RESUME_MAX_LOSS_TICKS) resume_loss_ticks++;
+            else clear_resume_snapshot(); /* di atas 5s: tidak boleh resume */
+        }
+
         flag_charging_Bulk  = 0;
         flag_charging_CV    = 0;
         flag_charging_FLOAT = 0;
         flag_enter_charge   = 0;
 
-        PWM_VALUE    = 0;
-        duty_cycle   = 0;
-        duty_percent = 0;
+        sync_pwm_outputs(0);
 
         MPPT_Hybrid_Reset();
 
-        t_enter_cv   = 0;
-        t_to_float   = 0;
-        t_bulk_float = 0;
-        t_rebulk     = 0;
-        t_bulk_highV = 0;
-        t_flow_ticks = 0;
-        t_abs_enter_ticks = 0;
+        reset_flow_counters();
         pv_absent_latched = 1;
 
         flag_adc_done = 0;
         return;
-    }
-    else {
-        /* PV sudah kembali; jika sebelumnya absent, evaluasi ulang state awal. */
+    } else {
+        /* PV sudah kembali; jika sebelumnya absent, evaluasi ulang/resume. */
         if (pv_absent_latched && !flag_enter_charge) {
+            /* Restart jendela rata-rata dengan sampel terbaru agar tidak tercemar nol. */
+            pv_window_reseed(Vpv_now);
+            pv_window_frozen = 0;
+            uint8_t resumed = 0;
+
+            if (resume_armed && resume_loss_ticks <= RESUME_MAX_LOSS_TICKS) {
+                uint16_t Vpv_now_return = dis_voltage_pv;
+                uint16_t dV_inst = abs_diff_u16(resume_vpv_snapshot ? resume_vpv_snapshot : resume_vpv_last, Vpv_now_return);
+                uint8_t within_band = (dV_inst <= RESUME_DVPV_WINDOW);
+                uint8_t above_min   = (Vpv_now_return >= PV_RESUME_MIN_V);
+                if (within_band && above_min) {
+                    uint16_t pwm_min = (uint16_t)(DUTY_LB_F * (float)MAX_PERIOD + 0.5f);
+                    uint16_t pwm_max = (uint16_t)(DUTY_UB_F * (float)MAX_PERIOD + 0.5f);
+                    uint16_t pwm_resume = clamp_u16(resume_pwm_snapshot ? resume_pwm_snapshot : resume_pwm_last, pwm_min, pwm_max);
+
+                    sync_pwm_outputs(pwm_resume);
+                    flag_charging_Bulk  = 1;
+                    flag_charging_CV    = 0;
+                    flag_charging_FLOAT = 0;
+                    flag_enter_charge   = 1;
+
+                    resumed = 1;
+                }
+            }
+
+            clear_resume_snapshot();
             pv_absent_latched = 0;
+
+            if (resumed) {
+                flag_adc_done = 0;
+                return; /* lanjut loop berikutnya dengan duty hasil resume */
+            }
+
             check_initial_state();
         } else {
             pv_absent_latched = 0;
+            if (resume_armed && resume_loss_ticks > RESUME_MAX_LOSS_TICKS) {
+                clear_resume_snapshot();
+            }
+            pv_window_frozen = 0;
         }
     }
 
     /* jika charging belum diizinkan (mis. relay belum siap), jangan lanjut loop */
     if (!flag_enter_charge) {
-        t_enter_cv   = 0;
-        t_to_float   = 0;
-        t_bulk_float = 0;
-        t_rebulk     = 0;
-        t_bulk_highV = 0;
-        t_abs_enter_ticks = 0;
+        reset_flow_counters();
         flag_adc_done = 0;
         return;
     }
@@ -1076,8 +1273,7 @@ void charging_flow(void)
             if (PWM_VALUE > 0) PWM_VALUE--;
         }
 
-        duty_cycle   = PWM_VALUE;
-        duty_percent = (PWM_VALUE * 100) / MAX_PERIOD;
+        sync_pwm_outputs(PWM_VALUE);
 
         /* Masuk FLOAT kalau:
            - Vbat tetap tinggi (>= 28.4V)
@@ -1119,8 +1315,7 @@ void charging_flow(void)
             if (PWM_VALUE > 0) PWM_VALUE--;
         }
 
-        duty_cycle   = PWM_VALUE;
-        duty_percent = (PWM_VALUE * 100) / MAX_PERIOD;
+        sync_pwm_outputs(PWM_VALUE);
 
         /* rebulk kalau drop stabil 2 detik */
         uint8_t ok_rebulk = (Vbat < V_REBULK);
