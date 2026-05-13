@@ -129,7 +129,7 @@ void DisplayRabbitAnimation(void) {
             u8g2_DrawXBM(&display, 0, 0, 64, 64, rabbitFrames[frame]);
             u8g2_SetFont(&display, u8g2_font_6x12_tr);
             u8g2_DrawStr(&display, 61, 27, "bunny");
-            u8g2_DrawStr(&display, 61, 38, "is running");
+            u8g2_DrawStr(&display, 61, 38, "is jumping");
             u8g2_DrawStr(&display, 61, 48, "...");
 
             u8g2_SendBuffer(&display);

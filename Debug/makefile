@@ -64,8 +64,8 @@ all: main-build
 main-build: MPPT_Interleaved_Boost.elf secondary-outputs
 
 # Tool invocations
-MPPT_Interleaved_Boost.elf MPPT_Interleaved_Boost.map: $(OBJS) $(USER_OBJS) D:\Semester\ 7\Interleaved\ Boost\ Converter\ 2\ Phase\ Design\MPPT\ Interleaved\ Boost\Software-20251204T083808Z-1-001\Software\MPPT_Interleaved_Boost\MPPT_Interleaved_Boost\STM32F103CBTX_FLASH.ld makefile objects.list $(OPTIONAL_TOOL_DEPS)
-	arm-none-eabi-gcc -o "MPPT_Interleaved_Boost.elf" @"objects.list" $(USER_OBJS) $(LIBS) -mcpu=cortex-m3 -T"D:\Semester 7\Interleaved Boost Converter 2 Phase Design\MPPT Interleaved Boost\Software-20251204T083808Z-1-001\Software\MPPT_Interleaved_Boost\MPPT_Interleaved_Boost\STM32F103CBTX_FLASH.ld" --specs=nosys.specs -Wl,-Map="MPPT_Interleaved_Boost.map" -Wl,--gc-sections -static --specs=nano.specs -mfloat-abi=soft -mthumb -Wl,--start-group -lc -lm -Wl,--end-group
+MPPT_Interleaved_Boost.elf MPPT_Interleaved_Boost.map: $(OBJS) $(USER_OBJS) C:\Users\gedee\Documents\Data\MPPT\ IBC\ Asynchronous\ 2\ Phase-Source\ Code\Iteration\ 2\ (best)\MPPT-Interleaved-Boost\STM32F103CBTX_FLASH.ld makefile objects.list $(OPTIONAL_TOOL_DEPS)
+	arm-none-eabi-gcc -o "MPPT_Interleaved_Boost.elf" @"objects.list" $(USER_OBJS) $(LIBS) -mcpu=cortex-m3 -T"C:\Users\gedee\Documents\Data\MPPT IBC Asynchronous 2 Phase-Source Code\Iteration 2 (best)\MPPT-Interleaved-Boost\STM32F103CBTX_FLASH.ld" --specs=nosys.specs -Wl,-Map="MPPT_Interleaved_Boost.map" -Wl,--gc-sections -static --specs=nano.specs -mfloat-abi=soft -mthumb -Wl,--start-group -lc -lm -Wl,--end-group
 	@echo 'Finished building target: $@'
 	@echo ' '
 

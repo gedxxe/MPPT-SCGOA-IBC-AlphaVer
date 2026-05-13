@@ -1,2 +1,2 @@
-../Core/Src/adc_sampling.c:45:6:HAL_ADC_ConvCpltCallback	2
-../Core/Src/adc_sampling.c:76:6:adc_sampling	2
+../Core/Src/adc_sampling.c:53:6:HAL_ADC_ConvCpltCallback	2
+../Core/Src/adc_sampling.c:89:6:adc_sampling	4
