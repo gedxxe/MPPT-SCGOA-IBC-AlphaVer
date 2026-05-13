@@ -1,0 +1,774 @@
+% ============================================================================
+% SCGOA_Mathematical_Formulation.tex
+% Formal Mathematical Description of the Enhanced SC-GOA MPPT Algorithm
+% Author: I Gede Bagus Jayendra
+% Date: 2026-02-19 | Revised edition
+% ============================================================================
+
+\documentclass[a4paper, 12pt]{article}
+
+% --- Standard academic packages ---
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{amsmath, amssymb, amsfonts}
+\usepackage{mathtools}
+\usepackage{bm}                     % Bold math symbols for vectors
+\usepackage{booktabs}               % Professional tables
+\usepackage{longtable}              % Multi-page tables
+\usepackage{enumitem}               % Custom list formatting
+\usepackage{geometry}
+\usepackage{hyperref}
+\usepackage{cleveref}               % Smart cross-references
+\usepackage{algorithm}
+\usepackage{algpseudocode}
+\usepackage{caption}
+
+\geometry{margin=2.5cm}
+\hypersetup{
+    colorlinks=true,
+    linkcolor=blue,
+    citecolor=blue,
+    urlcolor=blue
+}
+
+% --- Custom math operators ---
+\DeclareMathOperator{\sgn}{sgn}
+\DeclareMathOperator{\Var}{Var}
+
+% ============================================================================
+\title{%
+    \textbf{Mathematical Formulation of the Enhanced Sine-Cosine \\
+    Goat Optimization Algorithm (SC-GOA) for MPPT} \\[6pt]
+    \large Supporting Document for Paper and Thesis
+}
+
+\author{I Gede Bagus Jayendra}
+
+\date{February 19, 2026}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+This document provides a complete mathematical formulation of the Enhanced Sine-Cosine Goat Optimization Algorithm (SC-GOA) designed for Maximum Power Point Tracking (MPPT) in photovoltaic systems under both uniform irradiance and partial shading conditions. Every constant in the implementation is assigned a dedicated symbol, facilitating sensitivity analysis and future parametric studies. All equations are derived directly from the implemented MATLAB/Simulink code and are presented with consistent notation. The formulation covers six modifications relative to the baseline SCA and GOA: a corrected SCA distance formula, adaptive three-mode switching, a convergence-based lock, statistical partial shading detection, memory-guided parasite avoidance, and adaptive sample sizing. The theoretical foundations of both the Sine-Cosine Algorithm~\cite{mirjalili2016sca} and the Goat Optimization Algorithm~\cite{nozari2025goa} are discussed, along with the specific adaptations introduced for real-time MPPT. This document is structured as a formal appendix for an international journal paper and undergraduate thesis.
+\end{abstract}
+
+\tableofcontents
+\newpage
+
+% ============================================================================
+\section{Notation and Symbol Conventions}
+\label{sec:notation}
+% ============================================================================
+
+\Cref{tab:notation} summarizes the notation conventions used throughout this document. Scalars are denoted in italic, vectors in bold, and Greek letters are reserved for algorithm control parameters and thresholds. Every numerical constant appearing in the implementation is represented by a unique symbol to support formal parametric discussion.
+
+\begin{longtable}{@{} c l l @{}}
+\caption{Symbol conventions and notation.} \label{tab:notation} \\
+\toprule
+\textbf{Symbol} & \textbf{Description} & \textbf{Type / Value} \\
+\midrule
+\endfirsthead
+
+\caption[]{\textit{(continued)}} \\
+\toprule
+\textbf{Symbol} & \textbf{Description} & \textbf{Type / Value} \\
+\midrule
+\endhead
+
+\midrule
+\multicolumn{3}{r}{\textit{Continued on next page}} \\
+\endfoot
+
+\bottomrule
+\endlastfoot
+
+\multicolumn{3}{@{}l}{\textit{Population \& Search Space}} \\
+$N$                 & Population size (number of search agents) & Scalar, $N = 10$ \\
+$D_{\min}$          & Lower bound of duty cycle search space & Scalar, $D_{\min} = 0.10$ \\
+$D_{\max}$          & Upper bound of duty cycle search space & Scalar, $D_{\max} = 0.50$ \\
+$\mathrm{BW}$       & Search bandwidth, $D_{\max} - D_{\min}$ & Scalar, $\mathrm{BW} = 0.40$ \\
+$x_i^{(t)}$         & Position (duty cycle) of agent $i$ at iteration $t$ & Scalar \\
+$\mathbf{x}^{(t)}$  & Population vector $[x_1^{(t)},\ldots,x_N^{(t)}]$ & Vector $(1 \times N)$ \\
+$f_i^{(t)}$         & Fitness (average power) of agent $i$ at iteration $t$ & Scalar, [W] \\
+$x^{*}$             & Global best duty cycle & Scalar \\
+$f^{*}$             & Global best fitness & Scalar, [W] \\
+\midrule
+\multicolumn{3}{@{}l}{\textit{SCA Control Parameters}} \\
+$\alpha$             & SCA exploration amplitude & Scalar, $\alpha \in [\alpha_{\min}, \alpha_{\max}]$ \\
+$\alpha_0$           & Initial SCA amplitude & Scalar, $\alpha_0 = 2.0$ \\
+$\alpha_{\min}$      & Lower bound of $\alpha$ & Scalar, $\alpha_{\min} = 0.3$ \\
+$\alpha_{\max}$      & Upper bound of $\alpha$ ($= \alpha_0$) & Scalar, $\alpha_{\max} = 2.0$ \\
+$\delta$             & SCA amplitude decay factor & Scalar, $\delta = 0.92$ \\
+$\varepsilon$        & SCA amplitude growth factor & Scalar, $\varepsilon = 1.03$ \\
+\midrule
+\multicolumn{3}{@{}l}{\textit{GOA Control Parameters}} \\
+$\beta$              & GOA exploitation attraction coefficient & Scalar, $\beta = 0.95$ \\
+$J$                  & GOA jump escape probability & Scalar, $J = 0.25$ \\
+$\eta$               & GOA jump interpolation factor & Scalar, $\eta = 0.5$ \\
+\midrule
+\multicolumn{3}{@{}l}{\textit{Mode Selection Thresholds}} \\
+$\theta_{\mathrm{cv},1}$ & $\mathrm{CV}_f$ threshold for exploitation (Mode~2) & Scalar, $\theta_{\mathrm{cv},1} = 0.10$ \\
+$\theta_{\mathrm{rs},1}$ & $R_s$ threshold for exploitation (Mode~2) & Scalar, $\theta_{\mathrm{rs},1} = 0.15$ \\
+$\theta_{\mathrm{cv},2}$ & $\mathrm{CV}_f$ threshold for jump escape / $\alpha$ decay & Scalar, $\theta_{\mathrm{cv},2} = 0.05$ \\
+$\kappa_J$           & Stagnation count threshold for Mode~3 & Scalar, $\kappa_J = 2$ \\
+\midrule
+\multicolumn{3}{@{}l}{\textit{Convergence Lock Thresholds}} \\
+$\theta_{\mathrm{cv},L}$ & $\mathrm{CV}_f$ upper bound for lock & Scalar, $\theta_{\mathrm{cv},L} = 0.03$ \\
+$\theta_{\mathrm{rs},L}$ & $R_s$ upper bound for lock & Scalar, $\theta_{\mathrm{rs},L} = 0.02$ \\
+$\kappa_L$           & Stable count minimum for lock & Scalar, $\kappa_L = 2$ \\
+\midrule
+\multicolumn{3}{@{}l}{\textit{Partial Shading Detection}} \\
+$\tau_z$             & Z-score threshold (outlier bound) & Scalar, $\tau_z = 4.0$ \\
+$\tau_d$             & Power drop ratio threshold & Scalar, $\tau_d = 0.20$ \\
+$P_{\mathrm{guard}}$ & Minimum $P_{\mathrm{base}}$ for detection & Scalar, $P_{\mathrm{guard}} = 5.0$~W \\
+$\sigma_{\mathrm{guard}}$ & Minimum $\sigma_P$ for z-score validity & Scalar, $\sigma_{\mathrm{guard}} = 0.1$~W \\
+\midrule
+\multicolumn{3}{@{}l}{\textit{Parasite Avoidance}} \\
+$\gamma_p$           & Fraction of worst agents replaced & Scalar, $\gamma_p = 0.15$ \\
+$\gamma_\sigma$      & Gaussian perturbation factor & Scalar, $\gamma_\sigma = 0.05$ \\
+$\sigma_r$           & Perturbation std.\ dev., $\gamma_\sigma \cdot \mathrm{BW}$ & Scalar, $\sigma_r = 0.02$ \\
+\midrule
+\multicolumn{3}{@{}l}{\textit{Adaptive Sampling}} \\
+$\varphi_1$          & $\mathrm{CV}_P$ boundary: very stable / stable & Scalar, $\varphi_1 = 0.02$ \\
+$\varphi_2$          & $\mathrm{CV}_P$ boundary: stable / moderate & Scalar, $\varphi_2 = 0.05$ \\
+$\varphi_3$          & $\mathrm{CV}_P$ boundary: moderate / dynamic & Scalar, $\varphi_3 = 0.10$ \\
+$P_{\mu,\mathrm{guard}}$ & Minimum $\mu_P$ guard for $\mathrm{CV}_P$ computation & Scalar, $P_{\mu,\mathrm{guard}} = 1.0$~W \\
+\midrule
+\multicolumn{3}{@{}l}{\textit{Monitoring \& State Variables}} \\
+$P(k)$               & Instantaneous PV power at time step $k$ & Scalar, [W] \\
+$P_{\mathrm{base}}$  & Historical peak power reference & Scalar, [W] \\
+$\mathbf{h}$         & Power history buffer (rolling window) & Vector $(1 \times W)$, [W] \\
+$W$                  & Window size for rolling power history & Scalar, $W = 50$ \\
+$\mu_P, \sigma_P$    & Mean and std.\ dev.\ of power history & Scalar, [W] \\
+$n_s$                & Number of measurement samples per agent & Scalar, $n_s \in \{1,2,3,4\}$ \\
+$\mathcal{M}$        & Memory bank of archived solutions & Set, $|\mathcal{M}| \leq 3$ \\
+$s_c$                & Stable count (consecutive non-improving iterations) & Scalar \\
+$\mathrm{CV}_f$      & Coefficient of variation of fitness & Scalar \\
+$R_s$                & Spatial spread ratio & Scalar \\
+$\mathrm{CV}_P$      & Coefficient of variation of power history & Scalar \\
+\end{longtable}
+
+
+% ============================================================================
+\section{Algorithm Philosophy and Theoretical Background}
+\label{sec:philosophy}
+% ============================================================================
+
+The Enhanced SC-GOA is a hybrid metaheuristic controller that combines two optimization paradigms---the Sine-Cosine Algorithm (SCA) and the Goat Optimization Algorithm (GOA)---within a unified framework designed for real-time MPPT in photovoltaic (PV) systems. This section presents the theoretical foundations of each constituent algorithm, identifies the limitations relevant to the MPPT application, and describes the specific adaptations incorporated into the SC-GOA.
+
+
+\subsection{The Sine-Cosine Algorithm (SCA)}
+\label{subsec:sca_philosophy}
+
+The Sine-Cosine Algorithm was proposed by Mirjalili~\cite{mirjalili2016sca} as a population-based stochastic optimizer that uses the oscillatory properties of sinusoidal functions to balance exploration and exploitation. The underlying principle is that sine and cosine functions alternate between positive and negative values, allowing agents to fluctuate outward (exploration) or inward (exploitation) relative to a reference solution.
+
+In the original SCA formulation~\cite{mirjalili2016sca}, the position update of the $i$-th agent in the $d$-th dimension is governed by:
+\begin{equation}
+    X_{i,d}^{t+1} =
+    \begin{cases}
+        X_{i,d}^{t} + r_1 \cdot \sin(r_2) \cdot |r_3 \cdot P_{i,d}^{t} - X_{i,d}^{t}|, & \text{if } r_4 < 0.5 \\[4pt]
+        X_{i,d}^{t} + r_1 \cdot \cos(r_2) \cdot |r_3 \cdot P_{i,d}^{t} - X_{i,d}^{t}|, & \text{if } r_4 \geq 0.5
+    \end{cases}
+    \label{eq:sca_original}
+\end{equation}
+
+where $P_{i,d}^{t}$ is the destination (best-known position), $r_2 \in [0, 2\pi]$ is the phase angle, $r_3 \in [0, 2]$ stochastically weights the destination, $r_4 \in [0, 1]$ selects between sine and cosine, and the amplitude $r_1$ is defined as:
+\begin{equation}
+    r_1 = a - t \cdot \frac{a}{T_{\max}}
+    \label{eq:sca_r1_original}
+\end{equation}
+
+with $a$ being a constant and $T_{\max}$ the maximum number of iterations. This linear decay produces a gradual shift from exploration ($r_1$ large) to exploitation ($r_1 \to 0$) over the course of the optimization.
+
+\paragraph{Limitations in the MPPT context.}
+Two aspects of the original SCA are problematic when applied to real-time MPPT:
+
+\begin{enumerate}[label=(\roman*)]
+    \item \textbf{Coupled distance computation.} The term $|r_3 \cdot P_{i,d}^{t} - X_{i,d}^{t}|$ in \cref{eq:sca_original} computes the distance between the agent and a \emph{scaled} version of the destination $r_3 \cdot P_{i,d}^{t}$, rather than the true destination $P_{i,d}^{t}$. When $r_3 > 1$, the reference point overshoots the actual best position, introducing a directional bias. When $r_3 < 1$, the distance is shortened. This coupling between the scaling factor and the distance metric is a source of unnecessary directional noise, which is particularly relevant for the one-dimensional MPPT problem where precise convergence around the peak is desired.
+
+    \item \textbf{Iteration-dependent amplitude.} The decay in \cref{eq:sca_r1_original} requires a predefined maximum iteration count $T_{\max}$. In real-time MPPT, where the algorithm runs continuously on embedded hardware and must respond to unpredictable irradiance changes, a fixed iteration horizon is not well-defined. A linear time-based decay also does not account for the actual convergence state of the population.
+\end{enumerate}
+
+\paragraph{Modifications in the SC-GOA.}
+The SC-GOA addresses both issues. The distance is computed as $|x^{*} - x_i^{(t)}|$---the true absolute gap between the global best and the current agent---while $r_3$ modulates only the step \emph{magnitude} (\cref{eq:sca_update}). The iteration-based amplitude decay is replaced by a fitness-driven adaptive mechanism controlled by $\mathrm{CV}_f$, with the decay factor $\delta$ and growth factor $\varepsilon$ applied conditionally (\cref{eq:alpha_decay}).
+
+
+\subsection{The Goat Optimization Algorithm (GOA)}
+\label{subsec:goa_philosophy}
+
+The Goat Optimization Algorithm was introduced by Nozari, Abdi, and Szmelter-Jarosz~\cite{nozari2025goa} as a bio-inspired metaheuristic modelled on the survival strategies of mountain goats in rugged terrain. The algorithm abstracts three behavioral patterns into optimization operators: adaptive foraging for broad search, directed movement toward high-quality positions for local refinement, and stochastic jumps to escape unfavourable regions. A solution filtering mechanism (parasite avoidance) is additionally employed to remove poorly performing agents from the population.
+
+The GOA framework~\cite{nozari2025goa} defines three principal update mechanisms:
+
+\begin{enumerate}[label=(\roman*)]
+    \item \textbf{Adaptive foraging (global search):} Agents explore the search space stochastically, maintaining population diversity.
+    \item \textbf{Movement toward the best solution (local refinement):} Agents are attracted toward the globally best-known position, refining solutions in promising regions.
+    \item \textbf{Jump strategy (escape from local optima):} When stagnation is detected, agents execute jumps toward randomly selected peers, enabling escape from local optima basins.
+\end{enumerate}
+
+\paragraph{Limitations of the original GOA for MPPT.}
+While the GOA demonstrates competitive performance on standard benchmark functions~\cite{nozari2025goa}, several characteristics of the original algorithm are not directly suited to the MPPT application:
+
+\begin{enumerate}[label=(\roman*)]
+    \item \textbf{Instantaneous function evaluation assumption.} The original GOA, like most metaheuristics, assumes that the objective function can be evaluated instantaneously for any candidate solution. In MPPT, evaluating a candidate duty cycle requires physically applying it to the converter and measuring the resulting power output, a process that spans multiple switching periods. This sequential evaluation constraint increases the cost of each population sweep and necessitates careful scheduling.
+
+    \item \textbf{No convergence termination.} The original GOA iterates until a predetermined stopping criterion (typically $T_{\max}$) is reached. It does not include an internal mechanism to detect that convergence has been achieved and to cease perturbation. In MPPT, continued perturbation after the MPP has been located introduces steady-state power oscillations, reducing energy yield.
+
+    \item \textbf{Random respawning in parasite avoidance.} The GOA's solution filtering replaces weak agents with uniformly random positions. This approach discards accumulated information about previously identified high-quality regions, potentially requiring the algorithm to re-discover solutions it had already found.
+
+    \item \textbf{No irradiance change detection.} The original GOA does not incorporate a mechanism to detect changes in the objective landscape. Under partial shading conditions, where the P--V characteristic changes abruptly, the algorithm cannot distinguish between convergence at a true optimum and convergence at a local peak that is no longer the global optimum after an irradiance transition.
+
+    \item \textbf{Fixed sampling.} The GOA evaluates each candidate with a fixed number of function calls, without adapting the measurement effort to the noise level of the environment. In PV systems, noise varies with irradiance stability, suggesting that adaptive sampling can improve both speed (under stable conditions) and accuracy (under transient conditions).
+\end{enumerate}
+
+\paragraph{Adaptations in the SC-GOA.}
+The SC-GOA retains the GOA's exploitation and jump mechanisms (Modes~2 and~3) but introduces five modifications to address the limitations listed above:
+
+\begin{itemize}
+    \item Sequential evaluation with a finite state machine (\cref{sec:variables}) coordinates the duty cycle application, sample collection, and position update phases.
+    \item A convergence-based lock (\cref{subsec:convergence_lock}) freezes the output at $x^{*}$ when the population satisfies three simultaneous convergence criteria, reducing steady-state oscillations.
+    \item Memory-guided parasite avoidance (\cref{subsec:parasite}) replaces weak agents with Gaussian perturbations of the best archived solution from a memory bank $\mathcal{M}$, preserving accumulated knowledge.
+    \item Statistical partial shading detection (\cref{subsec:ps_detection}) uses a dual-criterion test (z-score and power drop ratio) to trigger re-initialization only upon significant irradiance changes.
+    \item Adaptive sample sizing (\cref{subsec:adaptive_sample}) adjusts $n_s$ based on the coefficient of variation of the power history, allocating measurement effort proportionally to the noise level.
+\end{itemize}
+
+The GOA's adaptive foraging (global exploration) role is delegated to the SCA exploration mode (\cref{subsec:mode1}), which provides a more structured oscillatory search pattern than random perturbation.
+
+
+\subsection{Hybridization Rationale}
+\label{subsec:hybrid_rationale}
+
+The SCA and GOA are combined to compensate for their respective limitations in the MPPT context:
+
+\begin{itemize}
+    \item \textbf{SCA provides structured exploration.} The SCA's sinusoidal update (\cref{eq:sca_update}) generates oscillatory trajectories around the global best that probe the neighbourhood at varying radii, offering a more systematic search pattern than random foraging in the one-dimensional duty cycle space.
+
+    \item \textbf{GOA provides targeted exploitation and escape.} The SCA does not include a dedicated exploitation mechanism separate from its exploration mode; it can only narrow the search by reducing $\alpha$, which is gradual. The GOA's linear attraction (Mode~2) converges exponentially, while its jump mechanism (Mode~3) offers a stochastic escape mechanism.
+
+    \item \textbf{Adaptive mode switching unifies both.} The three-mode selection rule (\cref{eq:mode_selection}) transitions between SCA exploration and GOA exploitation/escape based on real-time convergence metrics, selecting the appropriate behaviour at each stage of the optimisation.
+\end{itemize}
+
+The SC-GOA introduces six modifications relative to the baseline SCA and GOA:
+\begin{enumerate}[label=(\arabic*)]
+    \item Corrected SCA distance formula (decoupled $r_3$ from distance computation).
+    \item Adaptive three-mode switching (SCA exploration, GOA exploitation, GOA jump).
+    \item Convergence-based lock (output freezing when convergence criteria are satisfied).
+    \item Statistical partial shading detection (dual-criterion z-score and power drop).
+    \item Memory-guided parasite avoidance (archive-directed respawning).
+    \item Adaptive sample sizing (noise-proportional fitness evaluation).
+\end{enumerate}
+
+
+% ============================================================================
+\section{Parameter Initialization}
+\label{sec:initialization}
+% ============================================================================
+
+The algorithm is initialised once upon the first function call. All parameters are stored as persistent variables to maintain state across successive Simulink time steps.
+
+\subsection{Search Space Definition}
+
+The duty cycle search space is defined by the operating range of the interleaved boost converter topology. The lower bound $D_{\min}$ maintains continuous conduction mode (CCM) at minimum irradiance, while the upper bound $D_{\max}$ limits the voltage conversion ratio to avoid component stress:
+\begin{equation}
+    D_{\min} = 0.10, \qquad D_{\max} = 0.50, \qquad \mathrm{BW} = D_{\max} - D_{\min} = 0.40
+    \label{eq:search_space}
+\end{equation}
+
+\subsection{Algorithm Control Parameters}
+
+Three primary control parameters govern the behaviour of each operational mode:
+\begin{equation}
+    \alpha_0 = 2.0, \qquad \beta = 0.95, \qquad J = 0.25
+    \label{eq:control_params}
+\end{equation}
+
+where $\alpha_0$ is the initial SCA amplitude (subject to adaptive decay within $[\alpha_{\min}, \alpha_{\max}] = [0.3, 2.0]$ via the decay factor $\delta = 0.92$ and growth factor $\varepsilon = 1.03$), $\beta$ is the GOA exploitation coefficient, and $J$ is the GOA jump probability. The parameter $\alpha$ is the only dynamic control parameter; $\beta$ and $J$ remain constant throughout execution. The complete set of threshold parameters is listed in \cref{tab:params}.
+
+
+% ============================================================================
+\section{Variable Definitions}
+\label{sec:variables}
+% ============================================================================
+
+\subsection{Population Variables}
+
+The population consists of $N = 10$ agents, each representing a candidate duty cycle. The population state at iteration $t$ is described by:
+\begin{itemize}[leftmargin=2cm]
+    \item $\mathbf{x}^{(t)} = [x_1^{(t)}, x_2^{(t)}, \ldots, x_N^{(t)}] \in [D_{\min}, D_{\max}]^N$ \,---\, agent positions (duty cycles).
+    \item $\mathbf{f}^{(t)} = [f_1^{(t)}, f_2^{(t)}, \ldots, f_N^{(t)}] \in \mathbb{R}_{\geq 0}^N$ \,---\, agent fitness values (average measured power).
+\end{itemize}
+
+\subsection{Global Best Variables}
+
+The global best solution tracks the highest power point discovered across all iterations:
+\begin{itemize}[leftmargin=2cm]
+    \item $x^{*}$ \,---\, duty cycle corresponding to the best-known fitness.
+    \item $f^{*}$ \,---\, highest fitness (power) observed.
+\end{itemize}
+
+\subsection{Finite State Machine Variables}
+
+The algorithm operates as a three-state finite state machine (FSM):
+\begin{itemize}[leftmargin=2cm]
+    \item State~0 (\textit{Idle}): Output $x^{*}$, no evaluation in progress.
+    \item State~1 (\textit{Evaluating}): Sequentially measuring each agent's fitness.
+    \item State~2 (\textit{Locked}): Converged; output is held at $x^{*}$.
+\end{itemize}
+
+\subsection{Memory Bank}
+
+A memory bank $\mathcal{M} = \{(d_m, f_m)\}_{m=1}^{|\mathcal{M}|}$ with capacity $|\mathcal{M}| \leq 3$ stores historically high-performing solutions. This archive supports re-initialisation after partial shading events and guides the respawning of poorly performing agents (\cref{subsec:parasite}).
+
+
+% ============================================================================
+\section{Mathematical Formulation of SC-GOA}
+\label{sec:formulation}
+% ============================================================================
+
+\subsection{Stratified Population Initialization}
+
+Random initialisation introduces variance in coverage quality: some regions of the search space may receive multiple agents while others remain unexplored. Under partial shading, where the GMPP may reside at any duty cycle within $[D_{\min}, D_{\max}]$, uneven coverage can cause the algorithm to overlook the GMPP during early iterations.
+
+The SC-GOA uses a deterministic stratified initialisation strategy. The search space $[D_{\min}, D_{\max}]$ is partitioned into $N$ equal segments, and each agent is placed at the centroid of its segment, ensuring uniform coverage from the first iteration.
+
+The initial position of agent $i$ is:
+\begin{equation}
+    x_i^{(0)} = D_{\min} + \frac{(i - 0.5) \cdot \mathrm{BW}}{N}, \qquad i = 1, 2, \ldots, N
+    \label{eq:stratified_init}
+\end{equation}
+
+For $N = 10$ and $\mathrm{BW} = 0.40$, this yields the initial population:
+\begin{equation}
+    \mathbf{x}^{(0)} = [0.12,\; 0.16,\; 0.20,\; 0.24,\; 0.28,\; 0.32,\; 0.36,\; 0.40,\; 0.44,\; 0.48]
+    \label{eq:init_population}
+\end{equation}
+
+The global best is initialised at the population centre, $x^{*} = x_5^{(0)} = 0.28$.
+
+
+\subsection{Fitness Evaluation via Adaptive Multi-Sample Averaging}
+\label{subsec:fitness_eval}
+
+In a hardware-in-the-loop MPPT implementation, the fitness of each candidate solution is measured from the physical PV system rather than computed analytically. Measurement noise arises from switching transients, electromagnetic interference, sensor quantisation, and irradiance fluctuations. A single-sample fitness evaluation would expose the optimisation to this variance, potentially causing the algorithm to favour a noisy measurement over the true GMPP.
+
+The SC-GOA mitigates this by averaging $n_s$ consecutive power samples at each agent's duty cycle:
+\begin{equation}
+    f_i^{(t)} = \frac{1}{n_s} \sum_{k=1}^{n_s} P(k)
+    \label{eq:fitness_avg}
+\end{equation}
+
+where $P(k) = V_{\mathrm{pv}}(k) \cdot I_{\mathrm{pv}}(k)$ is the instantaneous PV power at the $k$-th sample. The adaptive determination of $n_s$ is described in \cref{subsec:adaptive_sample}.
+
+Agents are evaluated \textit{sequentially} (one per time step), reflecting the physical constraint that only one duty cycle can be applied to the converter at any given moment. The total evaluation time for one population sweep is $N \times n_s$ time steps.
+
+
+\subsection{Position Update: Mode 1 --- SCA Exploration}
+\label{subsec:mode1}
+
+Mode~1 uses a modified version of the Sine-Cosine Algorithm~\cite{mirjalili2016sca} for exploration. As discussed in \cref{subsec:sca_philosophy}, the SC-GOA corrects the distance formula by decoupling $r_3$ from the distance computation.
+
+The SCA exploration can be interpreted as a controlled oscillation around the best-known solution $x^{*}$. Sinusoidal and cosinusoidal perturbations generate trajectories that alternate between overshooting and undershooting $x^{*}$, with the oscillation magnitude governed by $\alpha$. The random phase $r_2$ and scaling factor $r_3$ provide stochastic diversity across each agent's update.
+
+The corrected update equation is:
+\begin{equation}
+    x_i^{(t+1)} = x_i^{(t)} + \alpha \cdot r_3 \cdot \phi(r_2, r_4) \cdot \left| x^{*} - x_i^{(t)} \right|
+    \label{eq:sca_update}
+\end{equation}
+
+where the trigonometric switching function is:
+\begin{equation}
+    \phi(r_2, r_4) =
+    \begin{cases}
+        \sin(r_2), & \text{if } r_4 < 0.5 \\[4pt]
+        \cos(r_2), & \text{if } r_4 \geq 0.5
+    \end{cases}
+    \label{eq:trig_switch}
+\end{equation}
+
+and the random variables are drawn as:
+\begin{equation}
+    r_2 \sim \mathcal{U}(0, 2\pi), \qquad r_3 \sim \mathcal{U}(0, 2), \qquad r_4 \sim \mathcal{U}(0, 1)
+    \label{eq:sca_randoms}
+\end{equation}
+
+Compared to the original SCA (\cref{eq:sca_original}), the distance $|x^{*} - x_i^{(t)}|$ is the true absolute gap between the global best and the current agent, computed independently of $r_3$. The scaling factor $r_3$ only modulates the step magnitude. The amplitude $\alpha$ is subject to adaptive decay (\cref{subsec:alpha_decay}).
+
+
+\subsection{Position Update: Mode 2 --- GOA Exploitation}
+\label{subsec:mode2}
+
+When the convergence metrics indicate that the population has concentrated around a promising peak in both fitness and spatial dimensions, the algorithm transitions to the GOA exploitation mode. This mode implements the ``movement toward the best solution'' mechanism from the GOA~\cite{nozari2025goa}, in which each agent moves a fraction $\beta$ of the remaining distance toward the global best:
+\begin{equation}
+    x_i^{(t+1)} = x_i^{(t)} + \beta \cdot \left( x^{*} - x_i^{(t)} \right)
+    \label{eq:goa_exploit}
+\end{equation}
+
+With $\beta = 0.95$, the residual distance from $x^{*}$ after $k$ steps is $(1 - \beta)^k = 0.05^k$, which decays exponentially. After 3 steps the residual is $0.05^3 = 1.25 \times 10^{-4}$, placing the agent effectively at $x^{*}$. Mode~2 is activated only when the population has already begun converging (\cref{subsec:mode_selection}), so this aggressive attraction is appropriate.
+
+
+\subsection{Position Update: Mode 3 --- GOA Jump Escape}
+\label{subsec:mode3}
+
+Under partial shading, multiple local maxima on the $P$--$V$ curve may have comparable power values. If the population converges to a local peak rather than the GMPP, the stagnation is detected through low $\mathrm{CV}_f$ combined with an elevated stable count $s_c$. The algorithm then invokes the GOA's jump strategy~\cite{nozari2025goa}, in which agents stochastically relocate toward randomly selected peers to diversify the search.
+
+The jump update is applied probabilistically:
+\begin{equation}
+    x_i^{(t+1)} =
+    \begin{cases}
+        x_i^{(t)} + \eta \cdot \left( x_r^{(t)} - x_i^{(t)} \right), & \text{if } U(0,1) < J \\[4pt]
+        x_i^{(t)}, & \text{otherwise}
+    \end{cases}
+    \label{eq:goa_jump}
+\end{equation}
+
+where $r \sim \mathcal{U}_{\text{int}}(1, N)$ is a uniformly random agent index and $\eta$ is the interpolation factor. With $\eta = 0.5$, a triggered agent moves halfway toward the selected peer---sufficient to leave the current basin of attraction while remaining in a potentially productive region.
+
+
+\subsection{Boundary Enforcement}
+\label{subsec:boundary}
+
+After each position update, all agent positions are clamped to the search space $[D_{\min}, D_{\max}]$ to ensure physically valid duty cycle values:
+\begin{equation}
+    x_i^{(t+1)} \leftarrow \max\!\left( D_{\min},\; \min\!\left( D_{\max},\; x_i^{(t+1)} \right) \right)
+    \label{eq:boundary}
+\end{equation}
+
+
+\subsection{Adaptive Three-Mode Selection}
+\label{subsec:mode_selection}
+
+The SC-GOA selects the update mode at each iteration based on two convergence metrics that quantify the population state in complementary spaces. The fitness coefficient of variation $\mathrm{CV}_f$ measures convergence in the objective space (fitness diversity), while the spatial spread ratio $R_s$ measures convergence in the decision space (positional clustering). The use of both metrics provides a more complete assessment than either metric alone.
+
+The convergence metrics are defined as:
+\begin{equation}
+    \mathrm{CV}_f = \frac{\sigma_f}{\mu_f}, \qquad
+    R_s = \frac{\max(\mathbf{x}^{(t)}) - \min(\mathbf{x}^{(t)})}{\mathrm{BW}}
+    \label{eq:convergence_metrics}
+\end{equation}
+
+where $\sigma_f$ and $\mu_f$ are the standard deviation and mean of the fitness vector $\mathbf{f}^{(t)}$, and $\mathrm{BW} = D_{\max} - D_{\min}$ is the total search bandwidth. The mode selection rule is:
+\begin{equation}
+    \text{Mode} =
+    \begin{cases}
+        2 \;\text{(GOA Exploitation)}, & \text{if } \mathrm{CV}_f < \theta_{\mathrm{cv},1} \;\wedge\; R_s < \theta_{\mathrm{rs},1} \\[4pt]
+        3 \;\text{(GOA Jump Escape)},  & \text{if } \mathrm{CV}_f < \theta_{\mathrm{cv},2} \;\wedge\; s_c > \kappa_J \\[4pt]
+        1 \;\text{(SCA Exploration)},  & \text{otherwise}
+    \end{cases}
+    \label{eq:mode_selection}
+\end{equation}
+
+The conditions in \cref{eq:mode_selection} are evaluated sequentially (Mode~2 is tested first); consequently, Mode~3 can only activate when Mode~2's compound condition is false. The logic encodes three population states:
+\begin{itemize}
+    \item \textbf{Mode~2} is selected when fitness values and spatial positions are both converging ($\mathrm{CV}_f < \theta_{\mathrm{cv},1}$, $R_s < \theta_{\mathrm{rs},1}$), indicating that the population is approaching a single peak and exploitation is warranted.
+    \item \textbf{Mode~3} is selected when fitness variance is low ($\mathrm{CV}_f < \theta_{\mathrm{cv},2}$) and the global best has stagnated for more than $\kappa_J$ iterations ($s_c > \kappa_J$). Because Mode~3 requires $\mathrm{CV}_f < 0.05 < 0.10 = \theta_{\mathrm{cv},1}$, Mode~2's fitness condition is necessarily satisfied; hence, Mode~2 can only have been bypassed because $R_s \geq \theta_{\mathrm{rs},1}$. In practice, Mode~3 therefore corresponds to a population whose agents produce similar fitness yet remain spatially dispersed---a pattern consistent with multi-peak landscapes under partial shading.
+    \item \textbf{Mode~1} is the default when the population remains diverse, maintaining global exploration through the modified SCA mechanism.
+\end{itemize}
+
+
+\subsection{Adaptive SCA Amplitude Decay}
+\label{subsec:alpha_decay}
+
+The original SCA~\cite{mirjalili2016sca} uses a linear amplitude decay (\cref{eq:sca_r1_original}) tied to $T_{\max}$, which is not applicable to real-time MPPT where the algorithm runs indefinitely. The SC-GOA replaces this with a fitness-driven adaptive mechanism: the amplitude contracts when convergence is detected and expands when the population remains diverse.
+
+The update rule is:
+\begin{equation}
+    \alpha^{(t+1)} =
+    \begin{cases}
+        \max\!\left(\alpha_{\min},\; \delta \cdot \alpha^{(t)}\right), & \text{if } \mathrm{CV}_f < \theta_{\mathrm{cv},2} \\[4pt]
+        \min\!\left(\alpha_{\max},\; \varepsilon \cdot \alpha^{(t)}\right), & \text{otherwise}
+    \end{cases}
+    \label{eq:alpha_decay}
+\end{equation}
+
+When $\mathrm{CV}_f < \theta_{\mathrm{cv},2}$, $\alpha$ is multiplied by the decay factor $\delta < 1$, narrowing the search. When the population is diverse, $\alpha$ grows by factor $\varepsilon > 1$ to sustain exploration. The bounds $[\alpha_{\min}, \alpha_{\max}]$ prevent the amplitude from either vanishing (premature convergence) or growing excessively (oscillatory behaviour).
+
+
+\subsection{Memory-Guided Parasite Avoidance}
+\label{subsec:parasite}
+
+The GOA's solution filtering mechanism~\cite{nozari2025goa} removes the weakest agents and replaces them with new solutions. In the original formulation, replacement is random. The SC-GOA modifies this by guiding the respawning with the memory bank $\mathcal{M}$: weak agents are relocated to a Gaussian neighbourhood of the best archived solution rather than to uniformly random positions. This retains accumulated information about previously identified high-quality regions while still introducing sufficient diversity to avoid duplicating existing agents.
+
+The number of agents to be respawned is:
+\begin{equation}
+    n_w = \max\!\left(1,\; \left\lfloor \gamma_p \cdot N \right\rfloor\right)
+    \label{eq:num_worst}
+\end{equation}
+
+For $N = 10$ and $\gamma_p = 0.15$, this yields $n_w = 1$. The agents are ranked by fitness in ascending order, and the bottom $n_w$ agents are replaced. The respawning strategy is:
+\begin{equation}
+    x_{\text{worst}} \leftarrow
+    \begin{cases}
+        d_{m^{*}} + \sigma_r \cdot \mathcal{N}(0,1), & \text{if } |\mathcal{M}| > 0 \\[4pt]
+        D_{\min} + \mathrm{BW} \cdot \mathcal{U}(0,1), & \text{if } |\mathcal{M}| = 0
+    \end{cases}
+    \label{eq:parasite}
+\end{equation}
+
+where $m^{*} = \arg\max_{m} f_m$ is the index of the best entry in the memory bank, $d_{m^{*}}$ is its archived duty cycle, and $\sigma_r = \gamma_\sigma \cdot \mathrm{BW}$ is the Gaussian perturbation standard deviation. The respawned position is subsequently clamped via \cref{eq:boundary}.
+
+
+\subsection{Convergence-Based Lock}
+\label{subsec:convergence_lock}
+
+A common limitation of metaheuristic MPPT controllers is that they continue to perturb the operating point after the MPP has been located, introducing steady-state power oscillations. The SC-GOA addresses this with a convergence-based lock that freezes the output duty cycle when three conditions are simultaneously satisfied, providing multiple lines of evidence that the population has stabilised at the MPP.
+
+The lock condition is:
+\begin{equation}
+    \text{Lock condition:} \quad
+    \mathrm{CV}_f < \theta_{\mathrm{cv},L} \;\;\wedge\;\; R_s < \theta_{\mathrm{rs},L} \;\;\wedge\;\; s_c \geq \kappa_L
+    \label{eq:lock_condition}
+\end{equation}
+
+The three criteria are:
+\begin{enumerate}[label=(\alph*)]
+    \item $\mathrm{CV}_f < \theta_{\mathrm{cv},L}$: All agents produce nearly identical fitness, indicating a single dominant peak.
+    \item $R_s < \theta_{\mathrm{rs},L}$: All agents have converged spatially to within $\theta_{\mathrm{rs},L}$ of the search bandwidth (maximum spread $\theta_{\mathrm{rs},L} \times \mathrm{BW} = 0.02 \times 0.40 = 0.008$ in duty cycle).
+    \item $s_c \geq \kappa_L$: The global best has not improved for at least $\kappa_L$ consecutive iterations, indicating that the current best is stable.
+\end{enumerate}
+
+When the lock engages, the FSM transitions to State~2 (\textit{Locked}), and the output is held at $D_{\text{out}} = x^{*}$ without further perturbation. The lock is disengaged only by the partial shading detection mechanism (\cref{subsec:ps_detection}). Using three simultaneous conditions rather than a single convergence indicator reduces the risk of premature locking at a suboptimal duty cycle.
+
+
+\subsection{Statistical Partial Shading Detection}
+\label{subsec:ps_detection}
+
+Partial shading transitions cause abrupt changes in the $P$--$V$ characteristic, shifting the GMPP to a different duty cycle. Timely detection is important: a missed transition results in sustained operation at a suboptimal power point, while a false detection triggers unnecessary re-scanning. The SC-GOA uses a dual-criterion statistical test that requires both a local anomaly (z-score) and a global degradation (power drop) to be present simultaneously, balancing sensitivity against false alarm rate.
+
+The instantaneous power is:
+\begin{equation}
+    P(k) = V_{\mathrm{pv}}(k) \cdot I_{\mathrm{pv}}(k)
+    \label{eq:power_instant}
+\end{equation}
+
+A rolling FIFO buffer $\mathbf{h} = [h_1, h_2, \ldots, h_W]$ of size $W$ stores the most recent power measurements. The buffer is updated at every time step regardless of the FSM state; during State~1 (evaluation sweep), it therefore contains power samples measured at different duty cycles. This does not compromise detection reliability because the precondition in \cref{eq:ps_preconditions} restricts activation to States~0 and~2. In State~2 (Locked), the duty cycle is held constant at $x^{*}$, so all recent buffer entries correspond to the same operating point and the statistics are representative. In the brief State~0 intervals between sweeps, the buffer may still contain mixed-duty-cycle samples, but the stringent dual-criterion trigger ($\tau_z = 4.0$ and $\tau_d = 0.20$) ensures that only large, sustained irradiance changes---which produce anomalies well above the inter-duty-cycle variance---result in detection. The statistical metrics are:
+\begin{equation}
+    \mu_P = \frac{1}{W} \sum_{j=1}^{W} h_j, \qquad
+    \sigma_P = \sqrt{\frac{1}{W-1} \sum_{j=1}^{W} (h_j - \mu_P)^2}
+    \label{eq:ps_stats}
+\end{equation}
+
+The dual-criterion trigger is:
+\begin{equation}
+    \text{PS detected} \iff
+    \underbrace{\frac{|P(k) - \mu_P|}{\sigma_P} > \tau_z}_{\text{Criterion 1: z-score}}
+    \;\;\wedge\;\;
+    \underbrace{\frac{P_{\mathrm{base}} - \mu_P}{P_{\mathrm{base}}} > \tau_d}_{\text{Criterion 2: power drop}}
+    \label{eq:ps_trigger}
+\end{equation}
+
+subject to the preconditions:
+\begin{equation}
+    \text{FSM state} \in \{0, 2\} \;\;\wedge\;\; P_{\mathrm{base}} > P_{\mathrm{guard}} \;\;\wedge\;\; \sigma_P > \sigma_{\mathrm{guard}}
+    \label{eq:ps_preconditions}
+\end{equation}
+
+\textbf{Criterion~1} (z-score $> \tau_z$) flags the current measurement as a statistical outlier. Under a Gaussian assumption on the power samples, $\tau_z = 4.0$ corresponds to a tail probability of approximately $6.3 \times 10^{-5}$; however, the actual power distribution may deviate from Gaussian due to switching transients and sensor nonlinearities, so $\tau_z$ should be interpreted as an empirically conservative sensitivity parameter rather than a formal statistical guarantee. In practice, this threshold restricts detection to deviations that substantially exceed normal operating variance.
+
+\textbf{Criterion~2} (power drop $> \tau_d$) confirms that the mean power has declined by at least $\tau_d = 20\%$ relative to the historical peak, indicating a genuine irradiance change rather than a transient fluctuation.
+
+The precondition $P_{\mathrm{base}} > P_{\mathrm{guard}}$ prevents activation during startup, and $\sigma_P > \sigma_{\mathrm{guard}}$ ensures the z-score denominator is numerically stable.
+
+Upon detection, the algorithm re-stratifies the population via \cref{eq:stratified_init}, resets $f^{*} \leftarrow 0$, restores $\alpha \leftarrow \alpha_0$, and sets $n_s \leftarrow 4$. The memory bank is pruned to retain only the top-2 entries, preserving useful knowledge while making room for new solutions.
+
+
+\subsection{Adaptive Sample Size}
+\label{subsec:adaptive_sample}
+
+There is a practical trade-off between tracking speed and measurement accuracy in MPPT. More samples per agent yield a more reliable fitness estimate but increase evaluation time; fewer samples accelerate tracking but increase susceptibility to noise. The SC-GOA addresses this trade-off by adjusting $n_s$ based on the observed stability of the PV power output, allocating measurement effort in proportion to the noise level.
+
+The coefficient of variation of the power history buffer provides a measure of the current measurement environment:
+\begin{equation}
+    \mathrm{CV}_P = \frac{\sqrt{\Var(\mathbf{h})}}{\mu_P}
+    \label{eq:cv_power}
+\end{equation}
+
+The adaptive rule maps power stability to the sample count:
+\begin{equation}
+    n_s =
+    \begin{cases}
+        1, & \text{if } \mathrm{CV}_P < \varphi_1 \;\;\text{(very stable)} \\
+        2, & \text{if } \varphi_1 \leq \mathrm{CV}_P < \varphi_2 \;\;\text{(stable)} \\
+        3, & \text{if } \varphi_2 \leq \mathrm{CV}_P < \varphi_3 \;\;\text{(moderate)} \\
+        4, & \text{if } \mathrm{CV}_P \geq \varphi_3 \;\;\text{(dynamic/transient)}
+    \end{cases}
+    \label{eq:adaptive_samples}
+\end{equation}
+
+subject to the guard condition $\mu_P > P_{\mu,\mathrm{guard}}$ (to avoid division by near-zero during startup). Under stable irradiance (STC), fewer samples are used, reducing evaluation time. Under dynamic conditions (partial shading transitions), more samples are averaged to improve measurement reliability.
+
+
+% ============================================================================
+\section{Complete Algorithm Summary}
+\label{sec:summary}
+% ============================================================================
+
+\Cref{tab:params} lists all SC-GOA parameters. Each parameter is identified by a unique symbol, facilitating formal discussion and sensitivity analysis.
+
+\begin{table}[htbp]
+\centering
+\caption{SC-GOA algorithm parameters and their values.}
+\label{tab:params}
+\renewcommand{\arraystretch}{1.3}
+\small
+\begin{tabular}{@{} l c c l @{}}
+\toprule
+\textbf{Parameter} & \textbf{Symbol} & \textbf{Value} & \textbf{Description} \\
+\midrule
+Population size & $N$ & 10 & Number of search agents \\
+Duty cycle range & $[D_{\min}, D_{\max}]$ & $[0.10, 0.50]$ & Converter operating range \\
+Search bandwidth & $\mathrm{BW}$ & 0.40 & $D_{\max} - D_{\min}$ \\
+\midrule
+SCA amplitude (initial) & $\alpha_0$ & 2.0 & Exploration step size \\
+SCA amplitude bounds & $[\alpha_{\min}, \alpha_{\max}]$ & $[0.3, 2.0]$ & Adaptive decay limits \\
+SCA decay factor & $\delta$ & 0.92 & Applied when $\mathrm{CV}_f < \theta_{\mathrm{cv},2}$ \\
+SCA growth factor & $\varepsilon$ & 1.03 & Applied when $\mathrm{CV}_f \geq \theta_{\mathrm{cv},2}$ \\
+\midrule
+GOA exploitation coeff. & $\beta$ & 0.95 & Attraction strength \\
+GOA jump probability & $J$ & 0.25 & Local optima escape rate \\
+GOA jump interpolation & $\eta$ & 0.5 & Fraction toward random peer \\
+\midrule
+Mode~2 fitness threshold & $\theta_{\mathrm{cv},1}$ & 0.10 & $\mathrm{CV}_f$ for exploitation \\
+Mode~2 spatial threshold & $\theta_{\mathrm{rs},1}$ & 0.15 & $R_s$ for exploitation \\
+Mode~3 fitness threshold & $\theta_{\mathrm{cv},2}$ & 0.05 & $\mathrm{CV}_f$ for jump / $\alpha$ decay \\
+Mode~3 stagnation threshold & $\kappa_J$ & 2 & $s_c > \kappa_J$ for jump \\
+\midrule
+Lock threshold (fitness CV) & $\theta_{\mathrm{cv},L}$ & 0.03 & $\mathrm{CV}_f$ upper bound \\
+Lock threshold (spatial) & $\theta_{\mathrm{rs},L}$ & 0.02 & $R_s$ upper bound \\
+Lock threshold (stability) & $\kappa_L$ & 2 & Minimum $s_c$ \\
+\midrule
+PS z-score threshold & $\tau_z$ & 4.0 & Statistical outlier bound \\
+PS drop ratio threshold & $\tau_d$ & 0.20 & Minimum power drop \\
+PS baseline guard & $P_{\mathrm{guard}}$ & 5.0~W & Minimum $P_{\mathrm{base}}$ \\
+PS std.\ dev.\ guard & $\sigma_{\mathrm{guard}}$ & 0.1~W & Minimum $\sigma_P$ \\
+\midrule
+Power history window & $W$ & 50 & Rolling buffer size \\
+Memory bank capacity & $|\mathcal{M}|_{\max}$ & 3 & Archived solutions \\
+Parasite replacement rate & $\gamma_p$ & 0.15 & Bottom agents replaced \\
+Gaussian perturbation factor & $\gamma_\sigma$ & 0.05 & Fraction of BW \\
+Perturbation std.\ dev. & $\sigma_r$ & $\gamma_\sigma \cdot \mathrm{BW} = 0.02$ & Respawn spread \\
+\midrule
+Adaptive sample: boundary 1 & $\varphi_1$ & 0.02 & $\mathrm{CV}_P$ very stable / stable \\
+Adaptive sample: boundary 2 & $\varphi_2$ & 0.05 & $\mathrm{CV}_P$ stable / moderate \\
+Adaptive sample: boundary 3 & $\varphi_3$ & 0.10 & $\mathrm{CV}_P$ moderate / dynamic \\
+Mean power guard & $P_{\mu,\mathrm{guard}}$ & 1.0~W & Minimum $\mu_P$ for $\mathrm{CV}_P$ \\
+Initial sample count & $n_{s,0}$ & 3 & Samples per agent at startup \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The pseudocode for the complete SC-GOA algorithm is presented in \cref{alg:scgoa}.
+
+\clearpage   % Ensure pseudocode starts on a fresh page to avoid footer collision
+
+\begin{algorithm}[t]
+\caption{Enhanced SC-GOA for MPPT}
+\label{alg:scgoa}
+\begin{algorithmic}[1]
+\Require $V_{\mathrm{pv}}, I_{\mathrm{pv}}$ (measured PV voltage and current)
+\Ensure $D_{\text{out}}$ (converter duty cycle)
+\Statex
+\If{first call}
+    \State Initialise population $\mathbf{x}^{(0)}$ via \cref{eq:stratified_init}
+    \State Set $x^{*} \leftarrow x_5^{(0)}$, \; $f^{*} \leftarrow 0$, \; $\alpha \leftarrow \alpha_0$
+    \State Set FSM $\leftarrow$ State~1 (Evaluating)
+\EndIf
+\Statex
+\State $P(k) \leftarrow V_{\mathrm{pv}} \cdot I_{\mathrm{pv}}$ \Comment{Instantaneous power}
+\State Update rolling buffer $\mathbf{h}$
+\Statex
+\If{FSM $\in \{0, 2\}$ \textbf{and} $P_{\mathrm{base}} > P_{\mathrm{guard}}$}
+    \State Compute z-score and drop ratio via \cref{eq:ps_trigger}
+    \If{PS detected}
+        \State Re-stratify population, reset $f^{*}$, $\alpha \leftarrow \alpha_0$, $n_s \leftarrow 4$
+        \State Prune memory bank to top-2 entries
+        \State FSM $\leftarrow$ State~1
+    \EndIf
+\EndIf
+\Statex
+\If{FSM = State~1}
+    \State Set $D_{\text{out}} \leftarrow x_{\text{eval\_idx}}$ \Comment{Apply current agent's duty cycle}
+    \State Accumulate power sample; increment sample counter
+    \If{$n_s$ samples collected for current agent}
+        \State Compute $f_i^{(t)}$ via \cref{eq:fitness_avg}; advance to next agent
+    \EndIf
+    \If{all $N$ agents evaluated}
+        \State Update $x^{*}$, $f^{*}$, $\mathcal{M}$, $P_{\mathrm{base}}$, $s_c$
+        \State Compute $\mathrm{CV}_f$, $R_s$ via \cref{eq:convergence_metrics}
+        \State Select mode via \cref{eq:mode_selection}
+        \State Update $\alpha$ via \cref{eq:alpha_decay}
+        \For{$i = 1$ to $N$}
+            \State Update $x_i^{(t+1)}$ via \cref{eq:sca_update}, \cref{eq:goa_exploit}, or \cref{eq:goa_jump}
+            \State Clamp via \cref{eq:boundary}
+        \EndFor
+        \State Apply parasite avoidance via \cref{eq:parasite}
+        \If{lock condition (\cref{eq:lock_condition}) satisfied}
+            \State FSM $\leftarrow$ State~2 (Locked)
+        \Else
+            \State FSM $\leftarrow$ State~0 (Idle)
+        \EndIf
+        \State Update $n_s$ via \cref{eq:adaptive_samples}
+    \EndIf
+\ElsIf{FSM = State~2}
+    \State $D_{\text{out}} \leftarrow x^{*}$ \Comment{Locked: reduced steady-state oscillation}
+\Else
+    \State $D_{\text{out}} \leftarrow x^{*}$ \Comment{Idle: output global best}
+\EndIf
+\end{algorithmic}
+\end{algorithm}
+
+
+% ============================================================================
+\section{Equation--Code Correspondence}
+\label{sec:correspondence}
+% ============================================================================
+
+\Cref{tab:eq_code} maps each equation in this document to its implementation in the MATLAB function \texttt{SC\_GOA\_Enhanced.m}.
+
+\begin{table}[htbp]
+\centering
+\caption{Mapping between equations and MATLAB code sections.}
+\label{tab:eq_code}
+\renewcommand{\arraystretch}{1.3}
+\begin{tabular}{@{} c l l @{}}
+\toprule
+\textbf{Equation} & \textbf{Description} & \textbf{Code Location} \\
+\midrule
+\cref{eq:search_space} & Search space definition & Lines 102--104 (Initialisation) \\
+\cref{eq:control_params} & Control parameters & Lines 127--129 \\
+\cref{eq:stratified_init} & Stratified initialisation & Lines 110--114 \\
+\cref{eq:fitness_avg} & Fitness averaging & Lines 277--278 \\
+\cref{eq:sca_update}--\cref{eq:sca_randoms} & SCA exploration update & Lines 374--395 \\
+\cref{eq:goa_exploit} & GOA exploitation update & Lines 403--404 \\
+\cref{eq:goa_jump} & GOA jump escape & Lines 413--416 \\
+\cref{eq:boundary} & Boundary enforcement & Lines 420--421 \\
+\cref{eq:convergence_metrics} & Convergence metrics & Lines 310--320 \\
+\cref{eq:mode_selection} & Mode selection rule & Lines 340--344 \\
+\cref{eq:alpha_decay} & SCA amplitude decay & Lines 353--357 \\
+\cref{eq:parasite}--\cref{eq:num_worst} & Parasite avoidance & Lines 438--463 \\
+\cref{eq:lock_condition} & Convergence lock & Lines 475--480 \\
+\cref{eq:ps_trigger}--\cref{eq:ps_preconditions} & Partial shading detection & Lines 173--192 \\
+\cref{eq:adaptive_samples} & Adaptive sample size & Lines 495--510 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+
+% ============================================================================
+% REFERENCES
+% ============================================================================
+
+\begin{thebibliography}{9}
+
+\bibitem{mirjalili2016sca}
+S.~Mirjalili, ``SCA: A Sine Cosine Algorithm for solving optimization problems,'' \textit{Knowledge-Based Systems}, vol.~96, pp.~120--133, 2016.
+\newline\href{https://doi.org/10.1016/j.knosys.2015.12.022}{DOI: 10.1016/j.knosys.2015.12.022}
+
+\bibitem{nozari2025goa}
+H.~Nozari, H.~Abdi, and A.~Szmelter-Jarosz, ``Goat Optimization Algorithm: A novel bio-inspired metaheuristic for global optimization,'' \textit{arXiv preprint}, arXiv:2503.02331, 2025.
+\newline\href{https://doi.org/10.48550/arXiv.2503.02331}{DOI: 10.48550/arXiv.2503.02331}
+
+\end{thebibliography}
+
+
+\end{document}
