@@ -54,16 +54,13 @@ The implementation is optimized for stability and real-time execution:
 
 The repository includes configurations for a **2-Phase Interleaved Boost Converter** targeting the **STM32F103CB** (Cortex-M3) platform:
 
-* 
-**PWM Frequency:** 30 kHz with 180° phase shift between phases to minimize input current ripple.
+* **PWM Frequency:** 30 kHz with 180° phase shift between phases to minimize input current ripple.
 
 
-* 
-**Control Loop:** MPPT tick runs at 10ms (synchronized with timer ISRs).
+* **Control Loop:** MPPT tick runs at 10ms (synchronized with timer ISRs).
 
 
-* 
-**Sensors:** 12-bit ADC sampling for $V_{pv}$ and $I_{pv}$ with moving average filtering.
+* **Sensors:** 12-bit ADC sampling for $V_{pv}$ and $I_{pv}$ with moving average filtering.
 
 
 
