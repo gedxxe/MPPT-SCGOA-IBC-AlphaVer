@@ -67,6 +67,8 @@ uint8_t flag_charging_CV	= 0;
 
 /* Telemetry ringan untuk mendeteksi “bench current limited” escape hatch. */
 uint8_t dbg_limit_psu       = 0;
+uint32_t psu_escape_trigger_count = 0;
+uint32_t psu_escape_active_ticks  = 0;
 
 //=======================================================
 /* ============================================================
@@ -217,10 +219,29 @@ static float randn_approx(void)
 #endif
 
 #if ENABLE_PSU_ESCAPE
-#define PSU_SAG_DVPV_TH     8u      // 0.8V drop dari sampel sebelumnya
-#define PSU_STALL_COUNT     80u     // 0.8s berturut-turut
-#define PSU_RELAX_TICKS     200u    // 2.0s menahan duty agar tidak naik
-#define PSU_RECOVER_DVPV    5u      // butuh recovery tegangan sebelum relaks dihapus
+#define MPPT_SOURCE_MODE_REAL_PV  0
+#define MPPT_SOURCE_MODE_BENCH_PSU 1
+#ifndef MPPT_SOURCE_MODE
+#define MPPT_SOURCE_MODE MPPT_SOURCE_MODE_REAL_PV
+#endif
+
+#if (MPPT_SOURCE_MODE == MPPT_SOURCE_MODE_BENCH_PSU)
+/* Profil bench PSU: longgarkan false-positive,
+ * butuh persistensi lebih lama, namun freeze awal lebih singkat.
+ */
+#define PSU_SAG_DVPV_TH        12u   // 1.2V drop
+#define PSU_POWER_STALL_MARGIN  (4u) // margin stagnasi daya lebih longgar
+#define PSU_STALL_COUNT         120u // 1.2s berturut-turut
+#define PSU_RELAX_TICKS         120u // 1.2s freeze awal
+#define PSU_RECOVER_DVPV        6u   // syarat recovery sedikit lebih ketat
+#else
+/* Profil panel PV riil (default) */
+#define PSU_SAG_DVPV_TH        8u    // 0.8V drop
+#define PSU_POWER_STALL_MARGIN (1u)  // margin stagnasi daya baseline
+#define PSU_STALL_COUNT        80u   // 0.8s berturut-turut
+#define PSU_RELAX_TICKS        200u  // 2.0s freeze awal
+#define PSU_RECOVER_DVPV       5u    // syarat recovery baseline
+#endif
 #endif
 
 
@@ -419,6 +440,7 @@ void MPPT_Hybrid_Reset(void)
     psu_limit_relax   = 0;
     psu_limit_ceiling = 0;
     dbg_limit_psu     = 0;
+    psu_escape_active_ticks = 0;
     Vpv_last          = 0;
     Ppv_last          = 0;
 #endif
@@ -608,7 +630,7 @@ void MPPT_Hybrid(void)
      * ======================================================== */
     uint8_t near_current_ceiling = (Ipv >= (uint16_t)(MAX_CURRENT_CHARGE - 1u)) || (Ibat >= (uint16_t)(MAX_CURRENT_CHARGE - 1u));
     uint8_t pv_sagging           = (Vpv_last > 0) && (Vpv + PSU_SAG_DVPV_TH < Vpv_last);
-    uint8_t power_not_better     = (Ppv_last > 0) && (Ppv32 + (uint32_t)Ipv <= Ppv_last); /* tambah Ipv sebagai margin noise */
+    uint8_t power_not_better     = (Ppv_last > 0) && (Ppv32 + (uint32_t)(PSU_POWER_STALL_MARGIN * Ipv) <= Ppv_last); /* margin stagnasi daya by profile */
 
     if (near_current_ceiling && pv_sagging && power_not_better && PWM_VALUE > 0) {
         if (psu_limit_cnt < PSU_STALL_COUNT) psu_limit_cnt++;
@@ -621,6 +643,7 @@ void MPPT_Hybrid(void)
         psu_limit_ceiling = PWM_VALUE;
         psu_limit_relax   = PSU_RELAX_TICKS;
         dbg_limit_psu     = 1;                 /* logging ringan untuk UI / debug */
+        psu_escape_trigger_count++;
 
         if (PWM_VALUE > 0) PWM_VALUE--;        /* redam 1 step supaya sag berhenti */
         sync_pwm_outputs(PWM_VALUE);
@@ -629,6 +652,7 @@ void MPPT_Hybrid(void)
 
     /* selama relaksasi, jangan biarkan duty melampaui ceiling */
     if (psu_limit_relax > 0) {
+        psu_escape_active_ticks++;
         psu_limit_relax--;
 
         if (psu_limit_ceiling > 0 && PWM_VALUE > psu_limit_ceiling) {
