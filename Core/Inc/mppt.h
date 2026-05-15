@@ -1,8 +1,10 @@
 /*
- * File Role    : Deklarasi algoritma MPPT hibrid (PnO + Goat Optimizer Algorithm/GOA) dan state machine charging.
+ * File Role    : Deklarasi engine MPPT pure SC-GOA dan state machine charging.
  * Dependencies : stm32f1xx_hal.h untuk tipe dasar dan akses ke waktu/HAL.
  * Fungsi inti  : MPPT_Hybrid(), MPPT_Hybrid_Reset(), check_initial_state(), charging_flow()
  *                beserta flag status (flag_charging_*, flag_adc_done, dbg_limit_psu).
+ * Perubahan   : 15 Mei 2026 - Sinkron istilah state charging (BULK/CV/FLOAT/IDLE)
+ *                dan MPPT engine; kompatibilitas: startup kini tanpa jalur P&O.
  */
 #ifndef MPPT_H
 #define MPPT_H
@@ -31,10 +33,10 @@ extern uint8_t dbg_limit_psu;
  * - ENABLE_PSU_ESCAPE=0: matikan jika sumber adalah panel PV murni.
  *   Dapat di-set via -D atau dengan mendefinisikan sebelum include mppt.c. */
 
-/* Menggerakkan MPPT hybrid (PnO + GOA) tiap 10 ms. */
+/* Menjalankan engine MPPT pure SC-GOA tiap 10 ms saat state BULK aktif. */
 void MPPT_Hybrid(void);
 
-/* Mereset seluruh state internal MPPT (GOA, PnO, debounce). */
+/* Mereset seluruh state internal MPPT engine (SC-GOA, debounce, guard). */
 void MPPT_Hybrid_Reset(void);
 
 /* Memilih state awal charging berdasar tegangan baterai dan mengizinkan loop. */

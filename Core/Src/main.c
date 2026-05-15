@@ -23,7 +23,9 @@
  * Dependencies : main.h menarik seluruh modul (ADC sampling, MPPT, LCD, proteksi, PWM).
  * Fungsi inti  : Fungsi main(), Error_Handler(), serta callback HAL untuk timer.
  * Catatan      : Struktur arsitektur (HAL init, scheduler berbasis flag, ISR timer/PWM)
- *                dipertahankan; perubahan berfokus pada kebersihan format dan dokumentasi. */
+ *                dipertahankan; perubahan berfokus pada kebersihan format dan dokumentasi.
+ * Perubahan   : 15 Mei 2026 - Terminologi diselaraskan: charging_flow mereferensikan
+ *                MPPT engine pure SC-GOA (tanpa startup P&O), perilaku loop tetap kompatibel. */
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
@@ -167,7 +169,7 @@ int main(void)
 	  }
 	  if (timeSch.flag_10mS) {
 		  timeSch.flag_10mS = 0;  /* 100 Hz: kecepatan utama state machine charging. */
-		  charging_flow();        /* Jalankan MPPT hybrid + penjagaan state charging. */
+		  charging_flow();        /* Jalankan MPPT engine SC-GOA + state machine charging. */
 	  }
 	  if (timeSch.flag_100mS) {
 		  timeSch.flag_100mS = 0; /* 10 Hz: refresh UI agar tidak flicker. */

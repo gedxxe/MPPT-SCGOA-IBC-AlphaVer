@@ -28,7 +28,9 @@ extern "C" {
 
 /* File Role    : Titik masuk aplikasi STM32, mendeklarasikan GPIO/pin, dependensi modul.
  * Dependencies : stm32f1xx_hal.h beserta modul aplikasi (adc_sampling, lcd_display, mppt, work_protect, pwm).
- * Fungsi inti  : Error_Handler() serta HAL_TIM_MspPostInit() digunakan startup/driver PWM. */
+ * Fungsi inti  : Error_Handler() serta HAL_TIM_MspPostInit() digunakan startup/driver PWM.
+ * Perubahan   : 15 Mei 2026 - Header diselaraskan dengan terminologi MPPT engine SC-GOA;
+ *                kompatibilitas perilaku: startup charging tidak lagi mendeskripsikan fallback P&O. */
 /* Includes ------------------------------------------------------------------*/
 #include "stm32f1xx_hal.h"
 
