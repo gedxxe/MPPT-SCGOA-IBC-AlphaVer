@@ -1,70 +1,135 @@
-﻿# MPPT-SCGOA-IBC-AlphaVer
+# MPPT-SCGOA-IBC-AlphaVer
 
-Internal testing repository for a **Hybrid Sine Cosine-Goat Optimizer Algorithm (GOA)** for MPPT applications. This project integrates metaheuristic global search with conventional local tracking to ensure fast convergence and minimal steady-state oscillation. Designed for MATLAB/Simulink with a focus on codegen compatibility for STM32/embedded deployment.
+## Overview
+This repository contains an embedded implementation of a pure SC-GOA based MPPT controller for an interleaved boost converter on STM32F103CB. The firmware is integrated with a charging state machine (Bulk, CV, Float, Idle) and includes runtime guards for stable converter operation.
 
-## 1. Algorithm Overview: Hybrid SC-GOA
+This README describes the implemented firmware behavior in `Core/Src/mppt.c`.
 
-The **SC-GOA** is a specialized hybrid metaheuristic designed to solve the Maximum Power Point Tracking (MPPT) problem, particularly under Partial Shading Conditions (PSC). It combines the oscillatory exploration of the **Sine Cosine Algorithm (SCA)** with the robust exploitation and jump-escape strategies of the **Goat Optimization Algorithm (GOA)**.
+## 1. Firmware Implementation Summary
 
-### Core Novelty:
+### 1.1 Runtime execution model
+- The MPPT routine is executed from the charging control flow every 10 ms.
+- SC-GOA search is active only during the Bulk charging state.
+- Candidate fitness uses staged evaluation (settling steps followed by averaging steps) to reduce switching ripple and sampling noise impact.
+- Duty command output is updated through bounded increments using a slew limiter.
 
-* **SCA Exploration (Mode 1):** Uses sinusoidal updates to generate oscillatory trajectories around the best-known solution, effectively probing the duty cycle space for the Global MPP (GMPP).
+### 1.2 Duty domain and representation
+- Duty search bounds:
+  - `DUTY_LB_F = 0.10`
+  - `DUTY_UB_F = 0.60`
+- Internal runtime output uses PWM counts (`0..MAX_PERIOD`) and is synchronized to duty display/control variables.
 
+### 1.3 Active runtime guards and limiters
+The firmware applies the following runtime safeguards:
+- PV-loss debounce using low-voltage and low-current conjunction over a debounce window.
+- Conduction gate before full optimizer progression.
+- Over-current and over-voltage step-down interlocks.
+- Optional PSU current-limit escape behavior through compile-time mode selection.
+- Adaptive or fixed slew limiting on duty updates per 10 ms tick.
 
-* **GOA Exploitation (Mode 2):** Provides targeted linear attraction toward the best solution for exponential convergence speed.
+## 2. Important Runtime Parameters
 
+| Category | Firmware parameter(s) | Default value | Runtime role |
+|---|---|---:|---|
+| Population | `N_GOAT` | 10 | Number of search agents |
+| Duty domain | `DUTY_LB_F`, `DUTY_UB_F` | 0.10, 0.60 | Search bounds |
+| Tick loop | MPPT call period | 10 ms | Optimizer execution interval |
+| Fitness evaluation | `EVAL_SETTLE_STEPS`, `EVAL_AVG_STEPS` | 1, 3 | Settling and averaging per candidate |
+| Slew limiter | `MIN_DELTA_PWM`, `MAX_DELTA_PWM` | 1, 6 | Maximum duty increment per tick |
+| Near-convergence | `CONV_WINDOW`, `CONV_COUNT_LIMIT` | 0.12, 15 | Stability indicator in firmware loop |
+| Re-initialization | `SCGOA_REINIT_IT` | 50 | Periodic population refresh |
+| PV-loss guard | `PV_LOSS_V_TH`, `PV_LOSS_I_TH`, `PV_LOSS_COUNT_N` | 5, 1, 50 | Loss detection with debounce |
+| Conduction guard | `COND_IBAT_TH`, `COND_STABLE_N` | 1, 10 | Enable condition for stable charge current |
+| PSU escape | `PSU_STALL_COUNT`, `PSU_RELAX_TICKS` | profile dependent | Temporary duty freeze under prolonged current-limit condition |
 
-* **GOA Jump Escape (Mode 3):** Executes stochastic jumps when stagnation is detected, allowing the algorithm to escape local optima basins.
+Notes:
+- `PSU_*` values depend on compile-time source mode (`REAL_PV` or `BENCH_PSU`).
+- Threshold values are in project-specific scaled ADC/display units.
 
+## 3. Charging State Flow Used by Firmware
 
+The implemented charging sequence uses four states:
 
-## 2. Key Technical Features
+1. **Bulk**
+   - SC-GOA MPPT is active.
+   - Conduction, PV-loss, and electrical protection guards remain active.
+2. **CV (Constant Voltage)**
+   - Battery voltage is regulated around the absorption target using hysteresis and dwell timing.
+3. **Float**
+   - Battery voltage is maintained around the float target with hysteresis and re-bulk condition checks.
+4. **Idle**
+   - Entered when PV is absent or charging path is disabled.
+   - Charging flags are cleared and MPPT context is reset.
 
-* **Adaptive 3-Mode Switching:** Transitions between exploration, exploitation, and escape based on real-time convergence metrics like the Coefficient of Variation ($CV_f$) and Spatial Spread Ratio ($R_s$).
+State transitions use voltage/current checks and timing conditions to avoid oscillatory toggling.
 
+## 4. Fundamental Formula
 
-* **Convergence-Based Lock:** Automatically freezes the duty cycle output once the population converges within a tight tolerance ($CV_f < 0.03$), eliminating steady-state power ripple.
+### 4.1 SC-GOA update equation used in firmware context
+For agent `i` at iteration `t`:
 
+\[
+x_i^{(t+1)} = x_i^{(t)} + \alpha\,\phi(r_2)\,r_3\,\left|x^{*} - x_i^{(t)}\right|
+\]
 
-* **Statistical Partial Shading Detection:** Employs a dual-criterion test using **Z-scores** and power drop ratios to distinguish between normal irradiance fluctuations and major shading events that require re-initialization.
+Where:
+- \(\phi(r_2)\) is either \(\sin(r_2)\) or \(\cos(r_2)\).
+- \(r_2\) is the random phase term.
+- \(r_3\) is the random step scaling term.
+- \(\alpha\) is the exploration amplitude.
 
+Notation mapping note:
+- `r1` represents amplitude-related control in model notation.
+- Firmware amplitude behavior is represented by `SCA_A0`, `SCA_A_MIN`, `SCA_DECAY_STEP`, and `SCA_ALPHA_STEP`.
 
-* **Memory-Guided Parasite Avoidance:** Replaces the worst-performing agents with Gaussian perturbations of high-quality solutions stored in an archived memory bank.
+### 4.2 Power fitness definition
+Candidate fitness is based on average measured PV power:
 
+\[
+f_i^{(t)} = \frac{1}{n_s}\sum_{k=1}^{n_s} P_k, \qquad P_k = V_{pv,k} I_{pv,k}
+\]
 
-* **Adaptive Sample Sizing:** Dynamically adjusts the number of measurement samples per agent based on environmental noise levels.
+In firmware execution, this is implemented with settle steps and averaging steps (`EVAL_SETTLE_STEPS`, `EVAL_AVG_STEPS`) rather than a single instantaneous sample.
 
+### 4.3 Smoothing, EMA, and momentum rules
+When enabled, runtime smoothing follows these standard forms.
 
+**EMA duty smoothing**
+\[
+D_{ema}(t) = \lambda D_{cmd}(t) + (1-\lambda) D_{ema}(t-1)
+\]
+with \(\lambda\) corresponding to `SCGOA_EMA_ALPHA`.
 
-## 3. Implementation Details (MATLAB/Simulink)
+**Momentum form**
+\[
+v_i^{(t+1)} = \beta v_i^{(t)} + \Delta x_i^{(t)}, \qquad
+x_i^{(t+1)} = x_i^{(t)} + v_i^{(t+1)}
+\]
+with \(\beta\) corresponding to `SCA_BETA_MOM`.
 
-The implementation is optimized for stability and real-time execution:
+**Convergence metric reference**
+- Runtime near-convergence behavior uses `CONV_WINDOW` and `CONV_COUNT_LIMIT`.
 
-* **Population Strategy:** Utilizes 5–10 agents with stratified initialization to ensure uniform coverage of the duty cycle range ($D_{min}=0.10$ to $D_{max}=0.50$).
+## 5. Model vs Firmware Mapping
 
+| MATLAB/model notation | Meaning | Firmware macro or implementation in `Core/Src/mppt.c` |
+|---|---|---|
+| \(N\) | population size | `N_GOAT` |
+| \(D_{\min}, D_{\max}\) | duty search bounds | `DUTY_LB_F`, `DUTY_UB_F` |
+| \(\alpha\), `r1` | exploration amplitude control | `SCA_A0`, `SCA_A_MIN`, `SCA_DECAY_STEP`, `SCA_ALPHA_STEP` |
+| `r2` | sinusoidal phase term | random phase generation in update routine |
+| `r3` | step scaling | `SCA_R3_MIN`, `SCA_R3_SPAN` |
+| \(\beta\) | momentum factor | `SCA_BETA_MOM` |
+| EMA coefficient | duty smoothing coefficient | `SCGOA_EMA_ALPHA` |
+| convergence metric | stability assessment | `CONV_WINDOW`, `CONV_COUNT_LIMIT` |
+| re-initialization interval | periodic refresh policy | `SCGOA_REINIT_IT` |
+| \(f_i\) | objective value per agent | power calculation and averaging (`EVAL_*`) |
 
-* **Smoothing Mechanisms:**
-* **Momentum Filter:** Incorporates agent velocity to smooth out sudden jumps during position updates.
-* **EMA Smoothing:** An Exponential Moving Average (EMA) filter is applied to the final duty cycle output to prevent hardware chattering.
+## 6. Note on Reported "Optimal Duty" Values
 
+Observed operating values such as 0.43 or 0.44 are tuning and operating outcomes under specific hardware and irradiance conditions. They are not fixed hard-coded optimum constants. The firmware continues online search within configured duty bounds.
 
-* **Rate Limiting:** The algorithm logic is configured to update every $N$ timesteps (e.g., 100 cycles) to allow for hardware settling time and prevent high-frequency oscillations.
-
-## 4. Hardware Architecture
-
-The repository includes configurations for a **2-Phase Interleaved Boost Converter** targeting the **STM32F103CB** (Cortex-M3) platform:
-
-* **PWM Frequency:** 30 kHz with 180° phase shift between phases to minimize input current ripple.
-
-
-* **Control Loop:** MPPT tick runs at 10ms (synchronized with timer ISRs).
-
-
-* **Sensors:** 12-bit ADC sampling for $V_{pv}$ and $I_{pv}$ with moving average filtering.
-
-
-
-## 5. Project Structure
+## 7. Project Structure
 ```
 SC-GOA_MPPT_IBC
 ┣ Core
@@ -101,5 +166,5 @@ SC-GOA_MPPT_IBC
 ┗ README.md
 ```
 
-
-**License:** This project is licensed under the MIT License - see the `LICENSE` file for details.
+## License
+This project is licensed under the GNU General Public License v3.0.
