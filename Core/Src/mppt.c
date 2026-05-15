@@ -223,6 +223,108 @@ static float randn_approx(void)
 #define PSU_RECOVER_DVPV    5u      // butuh recovery tegangan sebelum relaks dihapus
 #endif
 
+
+#ifndef MPPT_DEBUG_TRACE
+#define MPPT_DEBUG_TRACE 1
+#endif
+
+#if MPPT_DEBUG_TRACE
+#define MPPT_DUTY_WINDOW_LO_PWM ((uint16_t)(0.38f * (float)MAX_PERIOD + 0.5f))
+#define MPPT_DUTY_WINDOW_HI_PWM ((uint16_t)(0.48f * (float)MAX_PERIOD + 0.5f))
+#define MPPT_TRACE_BUF_LEN 128u
+
+typedef enum {
+    MPPT_PHASE_NONE = 0,
+    MPPT_PHASE_SETTLE = 1,
+    MPPT_PHASE_AVG = 2,
+    MPPT_PHASE_UPDATE = 3
+} mppt_trace_phase_t;
+
+typedef struct {
+    uint32_t tick_10ms;
+    uint16_t Vpv;
+    uint16_t Ipv;
+    uint32_t Ppv;
+    uint16_t pwm_before;
+    uint16_t pwm_after;
+    uint8_t flag_bulk;
+    uint8_t flag_cv;
+    uint8_t flag_float;
+    uint8_t guard_pv_loss;
+    uint8_t guard_conduction;
+    uint8_t guard_psu_escape;
+    uint8_t guard_oc_stepdown;
+    uint8_t guard_ov_stepdown;
+    uint8_t guard_max_delta_clip;
+    uint8_t guard_state_transition;
+    uint8_t goat_idx;
+    uint8_t goat_phase;
+    char trigger[18];
+} mppt_trace_entry_t;
+
+static mppt_trace_entry_t mppt_trace_buf[MPPT_TRACE_BUF_LEN];
+static volatile uint16_t mppt_trace_wr = 0;
+static volatile uint32_t mppt_trace_tick = 0;
+
+static volatile uint32_t mppt_dbg_cnt_window = 0;
+static volatile uint32_t mppt_dbg_cnt_max_delta_clip = 0;
+static volatile uint32_t mppt_dbg_cnt_guard_reset = 0;
+static volatile uint32_t mppt_dbg_cnt_state_transition = 0;
+
+static inline uint8_t mppt_trace_in_window(uint16_t pwm)
+{
+    return (pwm >= MPPT_DUTY_WINDOW_LO_PWM) && (pwm <= MPPT_DUTY_WINDOW_HI_PWM);
+}
+
+static inline void mppt_trace_log(uint16_t Vpv, uint16_t Ipv, uint32_t Ppv,
+                                  uint16_t pwm_before, uint16_t pwm_after,
+                                  uint8_t guard_pv_loss, uint8_t guard_conduction,
+                                  uint8_t guard_psu_escape, uint8_t guard_oc_stepdown,
+                                  uint8_t guard_ov_stepdown, uint8_t guard_max_delta_clip,
+                                  uint8_t guard_state_transition, uint8_t goat_now,
+                                  mppt_trace_phase_t phase, const char *trigger)
+{
+    uint8_t in_window = mppt_trace_in_window(pwm_before) || mppt_trace_in_window(pwm_after);
+    if (!in_window) return;
+
+    mppt_trace_entry_t *e = &mppt_trace_buf[mppt_trace_wr];
+    e->tick_10ms = mppt_trace_tick++;
+    e->Vpv = Vpv;
+    e->Ipv = Ipv;
+    e->Ppv = Ppv;
+    e->pwm_before = pwm_before;
+    e->pwm_after = pwm_after;
+    e->flag_bulk = flag_charging_Bulk;
+    e->flag_cv = flag_charging_CV;
+    e->flag_float = flag_charging_FLOAT;
+    e->guard_pv_loss = guard_pv_loss;
+    e->guard_conduction = guard_conduction;
+    e->guard_psu_escape = guard_psu_escape;
+    e->guard_oc_stepdown = guard_oc_stepdown;
+    e->guard_ov_stepdown = guard_ov_stepdown;
+    e->guard_max_delta_clip = guard_max_delta_clip;
+    e->guard_state_transition = guard_state_transition;
+    e->goat_idx = goat_now;
+    e->goat_phase = (uint8_t)phase;
+
+    uint8_t i = 0;
+    while (trigger && trigger[i] && i < (sizeof(e->trigger) - 1u)) {
+        e->trigger[i] = trigger[i];
+        i++;
+    }
+    e->trigger[i] = '\0';
+
+    if (guard_max_delta_clip) mppt_dbg_cnt_max_delta_clip++;
+    if (guard_pv_loss || guard_oc_stepdown || guard_ov_stepdown || guard_psu_escape) mppt_dbg_cnt_guard_reset++;
+    if (guard_state_transition) mppt_dbg_cnt_state_transition++;
+    mppt_dbg_cnt_window++;
+
+    mppt_trace_wr = (uint16_t)((mppt_trace_wr + 1u) % MPPT_TRACE_BUF_LEN);
+}
+#else
+#define mppt_trace_log(...) do { } while (0)
+#endif
+
 /* ============================================================
  *  STATE (persistent)
  * ============================================================ */
@@ -373,6 +475,7 @@ void MPPT_Hybrid(void)
 
     /* Hitung power 32-bit aman (tidak overflow) */
     uint32_t Ppv32 = (uint32_t)Vpv * (uint32_t)Ipv;
+    uint16_t pwm_before = PWM_VALUE;
 
     /* ========================================================
      * 2) PV-loss detector (AND + debounce)
@@ -398,6 +501,7 @@ void MPPT_Hybrid(void)
 
         MPPT_Hybrid_Reset();  /* Bersihkan state algoritma. */
         pv_loss_cnt = 0;      /* Reset debounce agar siap deteksi ulang. */
+        mppt_trace_log(Vpv, Ipv, Ppv32, pwm_before, PWM_VALUE, 1u, 0u, 0u, 0u, 0u, 0u, 0u, goat_idx, MPPT_PHASE_NONE, "DUTY_WINDOW_EVENT");
         UPDATE_TRENDS(Vpv, Ppv32);
         return;
     }
@@ -418,6 +522,7 @@ void MPPT_Hybrid(void)
         sync_pwm_outputs(duty_cycle);
 
         cond_cnt = 0;
+        mppt_trace_log(Vpv, Ipv, Ppv32, pwm_before, PWM_VALUE, 0u, 1u, 0u, 1u, 0u, 0u, 0u, goat_idx, MPPT_PHASE_NONE, "DUTY_WINDOW_EVENT");
         UPDATE_TRENDS(Vpv, Ppv32);
         return;
     }
@@ -428,6 +533,7 @@ void MPPT_Hybrid(void)
 
         /* Reset gating konduksi agar GOA tidak aktif saat proteksi. */
         cond_cnt = 0;
+        mppt_trace_log(Vpv, Ipv, Ppv32, pwm_before, PWM_VALUE, 0u, 1u, 0u, 0u, 1u, 0u, 0u, goat_idx, MPPT_PHASE_NONE, "DUTY_WINDOW_EVENT");
         UPDATE_TRENDS(Vpv, Ppv32);
         return;
     }
@@ -490,6 +596,10 @@ void MPPT_Hybrid(void)
         cond_cnt = 0;
     }
 
+    if (cond_cnt < COND_STABLE_N) {
+        mppt_trace_log(Vpv, Ipv, Ppv32, pwm_before, PWM_VALUE, 0u, 1u, 0u, 0u, 0u, 0u, 0u, goat_idx, MPPT_PHASE_NONE, "DUTY_WINDOW_EVENT");
+    }
+
 #if ENABLE_PSU_ESCAPE
     /* ========================================================
      * 7) Escape hatch: bench PSU current-limited (BULK only)
@@ -514,6 +624,7 @@ void MPPT_Hybrid(void)
 
         if (PWM_VALUE > 0) PWM_VALUE--;        /* redam 1 step supaya sag berhenti */
         sync_pwm_outputs(PWM_VALUE);
+        mppt_trace_log(Vpv, Ipv, Ppv32, pwm_before, PWM_VALUE, 0u, 0u, 1u, 0u, 0u, 0u, 0u, goat_idx, MPPT_PHASE_NONE, "DUTY_WINDOW_EVENT");
     }
 
     /* selama relaksasi, jangan biarkan duty melampaui ceiling */
@@ -570,6 +681,7 @@ void MPPT_Hybrid(void)
                 }
             }
 
+            mppt_trace_log(Vpv, Ipv, Ppv32, pwm_before, PWM_VALUE, 0u, 0u, dbg_limit_psu, 0u, 0u, 0u, 0u, goat_idx, (eval_settle > 0) ? MPPT_PHASE_SETTLE : MPPT_PHASE_AVG, "DUTY_WINDOW_EVENT");
             UPDATE_TRENDS(Vpv, Ppv32);
             return; // selama holding, jangan ubah PWM lagi
         }
@@ -594,10 +706,12 @@ void MPPT_Hybrid(void)
             /* slew limit biar nggak brutal */
             int diff = (int)pwm_cmd - (int)Dold_pwm;
             uint16_t maxStep = (conv_counter >= CONV_COUNT_LIMIT) ? 1u : MAX_DELTA_PWM;
-            if (diff > (int)maxStep) pwm_cmd = Dold_pwm + maxStep;
-            else if (diff < -(int)maxStep) pwm_cmd = Dold_pwm - maxStep;
+            uint8_t max_delta_clipped = 0u;
+            if (diff > (int)maxStep) { pwm_cmd = Dold_pwm + maxStep; max_delta_clipped = 1u; }
+            else if (diff < -(int)maxStep) { pwm_cmd = Dold_pwm - maxStep; max_delta_clipped = 1u; }
 
             sync_pwm_outputs(pwm_cmd); // sync
+            mppt_trace_log(Vpv, Ipv, Ppv32, pwm_before, PWM_VALUE, 0u, 0u, dbg_limit_psu, 0u, 0u, max_delta_clipped, 0u, (uint8_t)(goat_idx), MPPT_PHASE_UPDATE, "DUTY_WINDOW_EVENT");
             Dold_pwm    = pwm_cmd;
 
             prev_goat_idx = goat_idx;
@@ -694,10 +808,12 @@ void MPPT_Hybrid(void)
 #endif
         int diff = (int)pwm_cmd - (int)Dold_pwm;
         uint16_t maxStep = (conv_counter >= CONV_COUNT_LIMIT) ? 1u : MAX_DELTA_PWM;
-        if (diff > (int)maxStep) pwm_cmd = Dold_pwm + maxStep;
-        else if (diff < -(int)maxStep) pwm_cmd = Dold_pwm - maxStep;
+        uint8_t max_delta_clipped = 0u;
+        if (diff > (int)maxStep) { pwm_cmd = Dold_pwm + maxStep; max_delta_clipped = 1u; }
+        else if (diff < -(int)maxStep) { pwm_cmd = Dold_pwm - maxStep; max_delta_clipped = 1u; }
 
         sync_pwm_outputs(pwm_cmd);
+        mppt_trace_log(Vpv, Ipv, Ppv32, pwm_before, PWM_VALUE, 0u, 0u, dbg_limit_psu, 0u, 0u, max_delta_clipped, 0u, goat_idx, MPPT_PHASE_UPDATE, "DUTY_WINDOW_EVENT");
         Dold_pwm = pwm_cmd;
         UPDATE_TRENDS(Vpv, Ppv32);
         return;
@@ -1072,6 +1188,7 @@ void charging_flow(void)
 
             /* reset MPPT state biar nggak nyangkut kalau nanti balik BULK */
             MPPT_Hybrid_Reset();
+            mppt_trace_log(Vpv_now, Ipv_now, (uint32_t)Vpv_now * (uint32_t)Ipv_now, PWM_VALUE, PWM_VALUE, 0u, 0u, 0u, 0u, 0u, 0u, 1u, 0u, MPPT_PHASE_NONE, "DUTY_WINDOW_EVENT");
         }
 
         /* B) BULK -> FLOAT fallback:
@@ -1094,6 +1211,7 @@ void charging_flow(void)
             t_bulk_highV = 0;
 
             MPPT_Hybrid_Reset();
+            mppt_trace_log(Vpv_now, Ipv_now, (uint32_t)Vpv_now * (uint32_t)Ipv_now, PWM_VALUE, PWM_VALUE, 0u, 0u, 0u, 0u, 0u, 0u, 1u, 0u, MPPT_PHASE_NONE, "DUTY_WINDOW_EVENT");
         }
         /* escape hatch jika Vbat tinggi tetapi arus tidak pernah memenuhi syarat CV/FLOAT */
         else if (t_bulk_highV >= 3000u) {
@@ -1109,6 +1227,7 @@ void charging_flow(void)
             t_abs_enter_ticks = t_flow_ticks; // start float timing cleanly
 
             MPPT_Hybrid_Reset();
+            mppt_trace_log(Vpv_now, Ipv_now, (uint32_t)Vpv_now * (uint32_t)Ipv_now, PWM_VALUE, PWM_VALUE, 0u, 0u, 0u, 0u, 0u, 0u, 1u, 0u, MPPT_PHASE_NONE, "DUTY_WINDOW_EVENT");
         }
     }
 
@@ -1154,6 +1273,7 @@ void charging_flow(void)
             t_to_float = 0;
             t_rebulk   = 0;
             t_abs_dwell = 0;
+            mppt_trace_log(Vpv_now, Ipv_now, (uint32_t)Vpv_now * (uint32_t)Ipv_now, PWM_VALUE, PWM_VALUE, 0u, 0u, 0u, 0u, 0u, 0u, 1u, 0u, MPPT_PHASE_NONE, "DUTY_WINDOW_EVENT");
         }
     }
 
@@ -1189,6 +1309,7 @@ void charging_flow(void)
             t_bulk_float = 0;
 
             MPPT_Hybrid_Reset();
+            mppt_trace_log(Vpv_now, Ipv_now, (uint32_t)Vpv_now * (uint32_t)Ipv_now, PWM_VALUE, PWM_VALUE, 0u, 0u, 0u, 0u, 0u, 0u, 1u, 0u, MPPT_PHASE_NONE, "DUTY_WINDOW_EVENT");
         }
     }
 
