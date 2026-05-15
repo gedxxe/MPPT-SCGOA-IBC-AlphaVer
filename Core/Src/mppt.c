@@ -1,10 +1,11 @@
 /*
- * File Role    : Implementasi algoritma MPPT hybrid (Perturb & Observe untuk start,
- *                dilanjutkan Goat Optimizer Algorithm/GOA) beserta state machine
- *                charging Bulk/CV/Float dan proteksi input.
+ * File Role    : Implementasi engine MPPT pure SC-GOA beserta state machine charging
+ *                (BULK/CV/FLOAT/IDLE) dan proteksi input.
  * Dependencies : main.h untuk akses data ADC ter-skala, PWM_VALUE, flag charging,
  *                serta HAL timing; math.h untuk operasi float (log, pow).
  * Fungsi inti  : MPPT_Hybrid(), MPPT_Hybrid_Reset(), check_initial_state(), charging_flow().
+ * Perubahan   : 15 Mei 2026 - Terminologi diselaraskan ke pure SC-GOA; kompatibilitas
+ *                perilaku: startup sekarang tanpa P&O fallback, guard charging tetap sama.
  */
 #include "main.h"
 #include <math.h>
@@ -72,11 +73,11 @@ uint32_t psu_escape_active_ticks  = 0;
 
 //=======================================================
 /* ============================================================
- *  MPPT Hybrid (Pure SC-GOA refine) - STM32
- *  - MPPT dipanggil tiap 10 ms (charging_flow()).
- *  - Pure SC-GOA dijalankan terus selama fase BULK aktif.
- *  - Tidak ada fallback ke PnO/startup heuristic agar perilaku
- *    konsisten dengan model SCA MATLAB yang kamu kirim.
+ *  MPPT Engine (Pure SC-GOA) - STM32
+ *  - Engine MPPT dipanggil tiap 10 ms dari charging_flow().
+ *  - Pure SC-GOA dijalankan selama state charging BULK aktif.
+ *  - Tidak ada fallback P&O/startup heuristic agar perilaku konsisten
+ *    dengan model SCA MATLAB yang digunakan.
  *
  *  REVIEW & HW-NOTES (2024-xx):
  *  - Loop 10 ms tidak mengandung blocking/malloc; satu-satunya jitter
@@ -138,7 +139,7 @@ static float randn_approx(void)
 }
 
 /* ============================================================
- *  PARAMETER TUNING (ikut MATLAB hybrid kamu)
+ *  PARAMETER TUNING (mengacu model MATLAB SC-GOA)
  * ============================================================ */
 #define N_GOAT              10
 
@@ -667,7 +668,7 @@ void MPPT_Hybrid(void)
         eval_sumP     = 0;
         scgoa_iter    = 0;
 
-        /* Pure SC-GOA: tidak ada startup/fallback PnO */
+        /* Pure SC-GOA: startup langsung engine tanpa fallback P&O. */
         cond_cnt   = 0;
 
         hyb_isInit = 1;
