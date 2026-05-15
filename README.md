@@ -68,15 +68,16 @@ State transitions use voltage/current checks and timing conditions to avoid osci
 ### 4.1 SC-GOA update equation used in firmware context
 For agent `i` at iteration `t`:
 
-\[
+
+$$
 x_i^{(t+1)} = x_i^{(t)} + \alpha\,\phi(r_2)\,r_3\,\left|x^{*} - x_i^{(t)}\right|
-\]
+$$
 
 Where:
-- \(\phi(r_2)\) is either \(\sin(r_2)\) or \(\cos(r_2)\).
-- \(r_2\) is the random phase term.
-- \(r_3\) is the random step scaling term.
-- \(\alpha\) is the exploration amplitude.
+- $\phi(r_2)$ is either $\sin(r_2)$ or $\cos(r_2)$.
+- $r_2$ is the random phase term.
+- $r_3$ is the random step scaling term.
+- $\alpha$ is the exploration amplitude.
 
 Notation mapping note:
 - `r1` represents amplitude-related control in model notation.
@@ -85,9 +86,10 @@ Notation mapping note:
 ### 4.2 Power fitness definition
 Candidate fitness is based on average measured PV power:
 
-\[
+
+$$
 f_i^{(t)} = \frac{1}{n_s}\sum_{k=1}^{n_s} P_k, \qquad P_k = V_{pv,k} I_{pv,k}
-\]
+$$
 
 In firmware execution, this is implemented with settle steps and averaging steps (`EVAL_SETTLE_STEPS`, `EVAL_AVG_STEPS`) rather than a single instantaneous sample.
 
@@ -95,17 +97,19 @@ In firmware execution, this is implemented with settle steps and averaging steps
 When enabled, runtime smoothing follows these standard forms.
 
 **EMA duty smoothing**
-\[
+
+$$
 D_{ema}(t) = \lambda D_{cmd}(t) + (1-\lambda) D_{ema}(t-1)
-\]
-with \(\lambda\) corresponding to `SCGOA_EMA_ALPHA`.
+$$
+with $\lambda$ corresponding to `SCGOA_EMA_ALPHA`.
 
 **Momentum form**
-\[
+
+$$
 v_i^{(t+1)} = \beta v_i^{(t)} + \Delta x_i^{(t)}, \qquad
 x_i^{(t+1)} = x_i^{(t)} + v_i^{(t+1)}
-\]
-with \(\beta\) corresponding to `SCA_BETA_MOM`.
+$$
+with $\beta$ corresponding to `SCA_BETA_MOM`.
 
 **Convergence metric reference**
 - Runtime near-convergence behavior uses `CONV_WINDOW` and `CONV_COUNT_LIMIT`.
@@ -114,16 +118,16 @@ with \(\beta\) corresponding to `SCA_BETA_MOM`.
 
 | MATLAB/model notation | Meaning | Firmware macro or implementation in `Core/Src/mppt.c` |
 |---|---|---|
-| \(N\) | population size | `N_GOAT` |
-| \(D_{\min}, D_{\max}\) | duty search bounds | `DUTY_LB_F`, `DUTY_UB_F` |
-| \(\alpha\), `r1` | exploration amplitude control | `SCA_A0`, `SCA_A_MIN`, `SCA_DECAY_STEP`, `SCA_ALPHA_STEP` |
+| $N$ | population size | `N_GOAT` |
+| $D_{\min}, D_{\max}$ | duty search bounds | `DUTY_LB_F`, `DUTY_UB_F` |
+| $\alpha$, `r1` | exploration amplitude control | `SCA_A0`, `SCA_A_MIN`, `SCA_DECAY_STEP`, `SCA_ALPHA_STEP` |
 | `r2` | sinusoidal phase term | random phase generation in update routine |
 | `r3` | step scaling | `SCA_R3_MIN`, `SCA_R3_SPAN` |
-| \(\beta\) | momentum factor | `SCA_BETA_MOM` |
+| $\beta$ | momentum factor | `SCA_BETA_MOM` |
 | EMA coefficient | duty smoothing coefficient | `SCGOA_EMA_ALPHA` |
 | convergence metric | stability assessment | `CONV_WINDOW`, `CONV_COUNT_LIMIT` |
 | re-initialization interval | periodic refresh policy | `SCGOA_REINIT_IT` |
-| \(f_i\) | objective value per agent | power calculation and averaging (`EVAL_*`) |
+| $f_i$ | objective value per agent | power calculation and averaging (`EVAL_*`) |
 
 ## 6. Note on Reported "Optimal Duty" Values
 
