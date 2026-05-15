@@ -98,14 +98,14 @@ When enabled, runtime smoothing follows these standard forms.
 
 **EMA duty smoothing**
 
-$$
-D_{ema}(t) = \lambda D_{cmd}(t) + (1-\lambda) D_{ema}(t-1)
-$$
+$D_{ema}(t) = \lambda D_{cmd}(t) + (1-\lambda) D_{ema}(t-1)$
 with $\lambda$ corresponding to `SCGOA_EMA_ALPHA`.
 
 **Momentum form**
 
-$v_i^{(t+1)} = \beta v_i^{(t)} + \Delta x_i^{(t)}, \qquad$ $x_i^{(t+1)} = x_i^{(t)} + v_i^{(t+1)}$ with $\beta$ corresponding to `SCA_BETA_MOM`.
+$v_i^{(t+1)} = \beta v_i^{(t)} + \Delta x_i^{(t)}$,
+$x_i^{(t+1)} = x_i^{(t)} + v_i^{(t+1)}$
+with $\beta$ corresponding to `SCA_BETA_MOM`.
 
 **Convergence metric reference**
 - Runtime near-convergence behavior uses `CONV_WINDOW` and `CONV_COUNT_LIMIT`.
