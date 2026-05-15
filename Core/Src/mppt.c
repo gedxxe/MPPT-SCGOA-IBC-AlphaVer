@@ -162,10 +162,23 @@ static float randn_approx(void)
 #define CONV_COUNT_LIMIT    15
 
 /* Slew limiter (dalam PWM count per 10 ms)
- * MATLAB: maxDeltaD = 1*Ts. Kalau Ts=10ms => 0.01 duty.
- * 0.01 * 600 = 6 count.
+ * - USE_FIXED_SLEW=1  -> mode legacy (A/B test), step konstan.
+ * - USE_FIXED_SLEW=0  -> mode adaptif:
+ *      step dasar dipetakan oleh jarak duty |Dcmd-Dold|:
+ *        [0..2]   -> 1 count
+ *        [3..8]   -> 2 count
+ *        [9..16]  -> 4 count
+ *        [>=17]   -> 6 count
+ *      lalu otomatis diperkecil saat variansi daya jendela pendek tinggi.
  */
 #define MAX_DELTA_PWM       6u
+#define MIN_DELTA_PWM       1u
+#ifndef USE_FIXED_SLEW
+#define USE_FIXED_SLEW      0
+#endif
+#define PVAR_WINDOW_COUNT   8u
+#define PVAR_HIGH_TH        40000.0f
+#define PVAR_LOW_TH         4000.0f
 
 /* Hold & averaging untuk evaluasi fitness goat
  * (biar power yang dinilai tidak random akibat ripple/noise)
@@ -403,9 +416,58 @@ static uint8_t  eval_settle = 0;
 static uint8_t  eval_avg_cnt = 0;
 static uint32_t eval_sumP = 0;
 static uint32_t scgoa_iter = 0;
+static uint32_t ppv_win_idx = 0;
+static uint32_t ppv_win_cnt = 0;
+static float    ppv_win_sum = 0.0f;
+static float    ppv_win_sum_sq = 0.0f;
+static float    ppv_win_buf[PVAR_WINDOW_COUNT] = {0.0f};
 
 /* duty memory */
 static uint16_t Dold_pwm = 0;
+
+static inline uint16_t adaptive_slew_step(uint16_t diff_abs_pwm, uint16_t conv_cnt, uint32_t Ppv_now)
+{
+#if USE_FIXED_SLEW
+    (void)diff_abs_pwm;
+    (void)Ppv_now;
+    return (conv_cnt >= CONV_COUNT_LIMIT) ? MIN_DELTA_PWM : MAX_DELTA_PWM;
+#else
+    /* rolling variance power (window pendek) sebagai indikator stabilitas */
+    float old = ppv_win_buf[ppv_win_idx];
+    float now = (float)Ppv_now;
+    if (ppv_win_cnt < PVAR_WINDOW_COUNT) {
+        ppv_win_cnt++;
+    } else {
+        ppv_win_sum    -= old;
+        ppv_win_sum_sq -= (old * old);
+    }
+    ppv_win_buf[ppv_win_idx] = now;
+    ppv_win_sum    += now;
+    ppv_win_sum_sq += now * now;
+    ppv_win_idx = (ppv_win_idx + 1u) % PVAR_WINDOW_COUNT;
+
+    float mean = (ppv_win_cnt > 0u) ? (ppv_win_sum / (float)ppv_win_cnt) : now;
+    float var = (ppv_win_cnt > 1u) ? (ppv_win_sum_sq / (float)ppv_win_cnt) - (mean * mean) : 0.0f;
+    if (var < 0.0f) var = 0.0f;
+
+    /* mapping jarak duty -> step dasar (reproducible untuk tuning lapangan) */
+    uint16_t step = MIN_DELTA_PWM;
+    if (diff_abs_pwm >= 17u) step = 6u;
+    else if (diff_abs_pwm >= 9u) step = 4u;
+    else if (diff_abs_pwm >= 3u) step = 2u;
+
+    /* near-convergence tetap dipaksa halus */
+    if (conv_cnt >= CONV_COUNT_LIMIT && step > 2u) step = 2u;
+
+    /* noise/variansi tinggi => step otomatis diperkecil */
+    if (var >= PVAR_HIGH_TH) step = (step > 1u) ? (step / 2u) : 1u;
+    else if (var <= PVAR_LOW_TH && step < MAX_DELTA_PWM) step++;
+
+    if (step < MIN_DELTA_PWM) step = MIN_DELTA_PWM;
+    if (step > MAX_DELTA_PWM) step = MAX_DELTA_PWM;
+    return step;
+#endif
+}
 
 /* Update histori PV untuk escape hatch PSU (no-op if disabled). */
 #if ENABLE_PSU_ESCAPE
@@ -458,6 +520,10 @@ void MPPT_Hybrid_Reset(void)
     eval_avg_cnt   = 0;
     eval_sumP      = 0;
     scgoa_iter     = 0;
+    ppv_win_idx    = 0;
+    ppv_win_cnt    = 0;
+    ppv_win_sum    = 0.0f;
+    ppv_win_sum_sq = 0.0f;
 
     /* Reset solusi terbaik ke batas bawah duty. */
     gbest_P        = 0.0f;
@@ -729,7 +795,7 @@ void MPPT_Hybrid(void)
 
             /* slew limit biar nggak brutal */
             int diff = (int)pwm_cmd - (int)Dold_pwm;
-            uint16_t maxStep = (conv_counter >= CONV_COUNT_LIMIT) ? 1u : MAX_DELTA_PWM;
+            uint16_t maxStep = adaptive_slew_step((uint16_t)((diff >= 0) ? diff : -diff), conv_counter, Ppv32);
             uint8_t max_delta_clipped = 0u;
             if (diff > (int)maxStep) { pwm_cmd = Dold_pwm + maxStep; max_delta_clipped = 1u; }
             else if (diff < -(int)maxStep) { pwm_cmd = Dold_pwm - maxStep; max_delta_clipped = 1u; }
@@ -831,7 +897,7 @@ void MPPT_Hybrid(void)
         }
 #endif
         int diff = (int)pwm_cmd - (int)Dold_pwm;
-        uint16_t maxStep = (conv_counter >= CONV_COUNT_LIMIT) ? 1u : MAX_DELTA_PWM;
+        uint16_t maxStep = adaptive_slew_step((uint16_t)((diff >= 0) ? diff : -diff), conv_counter, Ppv32);
         uint8_t max_delta_clipped = 0u;
         if (diff > (int)maxStep) { pwm_cmd = Dold_pwm + maxStep; max_delta_clipped = 1u; }
         else if (diff < -(int)maxStep) { pwm_cmd = Dold_pwm - maxStep; max_delta_clipped = 1u; }
