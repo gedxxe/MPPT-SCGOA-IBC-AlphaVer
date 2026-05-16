@@ -129,13 +129,15 @@ static float rand01(void)
     return (float)(seed & 0x00FFFFFFu) / 16777216.0f; // 0..~1
 }
 
-/* approx gaussian (cukup untuk metaheuristik) */
-static float randn_approx(void)
+/* Hitung step penurunan duty untuk proteksi dengan respons proporsional.
+ * - excess_unit: selisih di atas limit (dalam unit display saat ini).
+ * - Respons dibatasi supaya tidak terlalu agresif dalam satu siklus 10ms.
+ */
+static inline uint16_t protection_step_from_excess(uint16_t excess_unit)
 {
-    float u1 = rand01();
-    float u2 = rand01();
-    float u3 = rand01();
-    return (u1 + u2 + u3 - 1.5f) * 1.1547f;
+    uint16_t step = 1u + (excess_unit / 2u);
+    if (step > 8u) step = 8u;
+    return step;
 }
 
 /* ============================================================
@@ -172,7 +174,8 @@ static float randn_approx(void)
  *        [>=17]   -> 6 count
  *      lalu otomatis diperkecil saat variansi daya jendela pendek tinggi.
  */
-#define MAX_DELTA_PWM       6u
+#define MAX_DELTA_PWM_UP    6u
+#define MAX_DELTA_PWM_DOWN  12u
 #define MIN_DELTA_PWM       1u
 #ifndef USE_FIXED_SLEW
 #define USE_FIXED_SLEW      0
@@ -426,12 +429,12 @@ static float    ppv_win_buf[PVAR_WINDOW_COUNT] = {0.0f};
 /* duty memory */
 static uint16_t Dold_pwm = 0;
 
-static inline uint16_t adaptive_slew_step(uint16_t diff_abs_pwm, uint16_t conv_cnt, uint32_t Ppv_now)
+static inline uint16_t adaptive_slew_step(uint16_t diff_abs_pwm, uint16_t conv_cnt, uint32_t Ppv_now, uint8_t is_step_down)
 {
 #if USE_FIXED_SLEW
     (void)diff_abs_pwm;
     (void)Ppv_now;
-    return (conv_cnt >= CONV_COUNT_LIMIT) ? MIN_DELTA_PWM : MAX_DELTA_PWM;
+    return (conv_cnt >= CONV_COUNT_LIMIT) ? MIN_DELTA_PWM : (is_step_down ? MAX_DELTA_PWM_DOWN : MAX_DELTA_PWM_UP);
 #else
     /* rolling variance power (window pendek) sebagai indikator stabilitas */
     float old = ppv_win_buf[ppv_win_idx];
@@ -462,10 +465,17 @@ static inline uint16_t adaptive_slew_step(uint16_t diff_abs_pwm, uint16_t conv_c
 
     /* noise/variansi tinggi => step otomatis diperkecil */
     if (var >= PVAR_HIGH_TH) step = (step > 1u) ? (step / 2u) : 1u;
-    else if (var <= PVAR_LOW_TH && step < MAX_DELTA_PWM) step++;
+    else if (var <= PVAR_LOW_TH && step < MAX_DELTA_PWM_UP) step++;
 
     if (step < MIN_DELTA_PWM) step = MIN_DELTA_PWM;
-    if (step > MAX_DELTA_PWM) step = MAX_DELTA_PWM;
+    uint16_t step_cap = is_step_down ? MAX_DELTA_PWM_DOWN : MAX_DELTA_PWM_UP;
+    if (step > step_cap) step = step_cap;
+
+    if (is_step_down) {
+        /* Recovery saat tegangan input drop wajib lebih agresif dibanding naik duty. */
+        if (step < 2u) step = 2u;
+        if (var <= PVAR_LOW_TH && step < step_cap) step++;
+    }
     return step;
 #endif
 }
@@ -607,7 +617,9 @@ void MPPT_Hybrid(void)
      * ======================================================== */
     if (dis_current_bat > MAX_CURRENT_CHARGE) {
         /* Kurangi duty satu langkah untuk meredam arus berlebih. */
-        if (duty_cycle > 0) duty_cycle--;
+        uint16_t over_i = (uint16_t)(dis_current_bat - MAX_CURRENT_CHARGE);
+        uint16_t drop = protection_step_from_excess(over_i);
+        duty_cycle = (duty_cycle > drop) ? (uint16_t)(duty_cycle - drop) : 0u;
         sync_pwm_outputs(duty_cycle);
 
         cond_cnt = 0;
@@ -617,7 +629,9 @@ void MPPT_Hybrid(void)
     }
     if (dis_voltage_bat > MAX_BATTERY_CHARGE) {
         /* Turunkan duty jika tegangan baterai melewati batas bulk. */
-        if (duty_cycle > 0) duty_cycle--;
+        uint16_t over_v = (uint16_t)(dis_voltage_bat - MAX_BATTERY_CHARGE);
+        uint16_t drop = protection_step_from_excess(over_v);
+        duty_cycle = (duty_cycle > drop) ? (uint16_t)(duty_cycle - drop) : 0u;
         sync_pwm_outputs(duty_cycle);
 
         /* Reset gating konduksi agar GOA tidak aktif saat proteksi. */
@@ -796,7 +810,7 @@ void MPPT_Hybrid(void)
 
             /* slew limit biar nggak brutal */
             int diff = (int)pwm_cmd - (int)Dold_pwm;
-            uint16_t maxStep = adaptive_slew_step((uint16_t)((diff >= 0) ? diff : -diff), conv_counter, Ppv32);
+            uint16_t maxStep = adaptive_slew_step((uint16_t)((diff >= 0) ? diff : -diff), conv_counter, Ppv32, (diff < 0));
             uint8_t max_delta_clipped = 0u;
             if (diff > (int)maxStep) { pwm_cmd = Dold_pwm + maxStep; max_delta_clipped = 1u; }
             else if (diff < -(int)maxStep) { pwm_cmd = Dold_pwm - maxStep; max_delta_clipped = 1u; }
@@ -898,7 +912,7 @@ void MPPT_Hybrid(void)
         }
 #endif
         int diff = (int)pwm_cmd - (int)Dold_pwm;
-        uint16_t maxStep = adaptive_slew_step((uint16_t)((diff >= 0) ? diff : -diff), conv_counter, Ppv32);
+        uint16_t maxStep = adaptive_slew_step((uint16_t)((diff >= 0) ? diff : -diff), conv_counter, Ppv32, (diff < 0));
         uint8_t max_delta_clipped = 0u;
         if (diff > (int)maxStep) { pwm_cmd = Dold_pwm + maxStep; max_delta_clipped = 1u; }
         else if (diff < -(int)maxStep) { pwm_cmd = Dold_pwm - maxStep; max_delta_clipped = 1u; }
